@@ -21,7 +21,7 @@ keeps widening past `stop_loss_z`.
 from __future__ import annotations
 
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import numpy as np
 from statsmodels.tsa.stattools import adfuller
@@ -96,15 +96,25 @@ class StatisticalArbStrategy(Strategy):
         series_a = np.array(state.history_a)
         series_b = np.array(state.history_b)
 
+        # A degenerate (constant) hedge-asset series over the lookback window
+        # (e.g. a thin book with no trades) makes the OLS fit meaningless and
+        # can hand adfuller a degenerate series; treat it as "not evaluable"
+        # rather than letting a numeric edge case crash the detection loop.
+        if series_b.std() <= 0 or series_a.std() <= 0:
+            return None
+
         hedge_ratio = float(np.polyfit(series_b, series_a, 1)[0])
         spread_series = series_a - hedge_ratio * series_b
         spread_now = spread_series[-1]
         mean, std = float(spread_series.mean()), float(spread_series.std())
-        if std <= 0:
+        if not np.isfinite(std) or std <= 0:
             return None
         z = (spread_now - mean) / std
 
-        adf_pvalue = float(adfuller(spread_series)[1])
+        try:
+            adf_pvalue = float(adfuller(spread_series)[1])
+        except (ValueError, np.linalg.LinAlgError):
+            adf_pvalue = 1.0  # treat as "not cointegrated" rather than crashing
         is_cointegrated = adf_pvalue <= self.adf_pvalue_max
 
         if state.position_open:

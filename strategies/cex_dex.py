@@ -24,7 +24,7 @@ from config.settings import MEV_PRIORITY_FEE_USD_FALLBACK, TAKER_FEE_FALLBACK
 from config.venues import taker_fee_for
 from core.market_state import MarketState, PoolState
 from strategies.base import Leg, Opportunity, Strategy
-from strategies.dex_dex import quote_pool_output
+from strategies.dex_dex import quote_pool_input_for_base_out
 
 
 class CexDexStrategy(Strategy):
@@ -73,8 +73,8 @@ class CexDexStrategy(Strategy):
         size = self.probe_size_base
 
         # Direction 1: buy on DEX (against pool reserves, with price impact), sell on CEX bid.
-        dex_quote_out = quote_pool_output(pool, size)
-        dex_effective_price = dex_quote_out / size if size else 0.0
+        dex_quote_in = quote_pool_input_for_base_out(pool, size)
+        dex_effective_price = dex_quote_in / size if size and dex_quote_in != float("inf") else 0.0
         if dex_effective_price > 0:
             gross_usd = (cex_bid - dex_effective_price) * size
             costs_usd = cex_bid * size * cex_fee + gas_usd + priority_fee_usd

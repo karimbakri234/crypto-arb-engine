@@ -50,6 +50,22 @@ def constant_product_output(reserve_in: float, reserve_out: float, amount_in: fl
     return reserve_out * amount_in_after_fee / (reserve_in + amount_in_after_fee)
 
 
+def constant_product_input_needed(reserve_in: float, reserve_out: float, amount_out: float, fee: float) -> float:
+    """Input amount required to receive exactly `amount_out` from a constant-product AMM.
+
+    The inverse of `constant_product_output`. Needed whenever the trade is
+    framed as "how much do I pay to *acquire* this much of the output
+    asset" (buying) rather than "how much do I receive for selling this
+    much of the input asset" -- the two are not the same price at any
+    size above the infinitesimal, since slippage moves against the trader
+    in opposite directions in each framing.
+    """
+    if reserve_in <= 0 or reserve_out <= 0 or amount_out <= 0 or amount_out >= reserve_out:
+        return float("inf")
+    amount_in_after_fee = reserve_in * amount_out / (reserve_out - amount_out)
+    return amount_in_after_fee / (1.0 - fee)
+
+
 def concentrated_liquidity_output(
     sqrt_price_x96: float,
     liquidity: float,
@@ -84,12 +100,27 @@ def concentrated_liquidity_output(
 
 
 def quote_pool_output(pool: PoolState, amount_in_base: float) -> float:
-    """Quote swapping `amount_in_base` units of the pool's base asset for quote."""
+    """Quote *selling* `amount_in_base` units of the pool's base asset for quote."""
     if pool.tick_liquidity is not None and pool.sqrt_price_x96 is not None:
         return concentrated_liquidity_output(
             pool.sqrt_price_x96, pool.tick_liquidity, amount_in_base, pool.fee, zero_for_one=True
         )
     return constant_product_output(pool.reserve_base, pool.reserve_quote, amount_in_base, pool.fee)
+
+
+def quote_pool_input_for_base_out(pool: PoolState, amount_out_base: float) -> float:
+    """Quote the quote-asset cost to *buy* `amount_out_base` units of base from the pool.
+
+    This is the correct direction for "how much would it cost me to
+    acquire this much base from the DEX" -- using `quote_pool_output`
+    (the sell-side formula) for that question gets the slippage direction
+    backwards at any non-trivial size. Concentrated-liquidity pools are
+    not yet supported in this direction; callers should treat `inf` as
+    "cannot price this on this pool type" rather than a real cost.
+    """
+    if pool.tick_liquidity is not None and pool.sqrt_price_x96 is not None:
+        return float("inf")
+    return constant_product_input_needed(pool.reserve_quote, pool.reserve_base, amount_out_base, pool.fee)
 
 
 class DexDexStrategy(Strategy):
