@@ -56,10 +56,17 @@ class DexVenue:
 
 
 # ---------------------------------------------------------------------------
-# CEX venues (>= 15 required; 20 defined). Fees are representative VIP-0
+# CEX venues (>= 15 required; 19 defined). Fees are representative VIP-0
 # taker/maker rates; withdrawal fees are representative flat fees for BTC/
 # ETH/USDT and are approximate — always refresh from the exchange's live
 # fee schedule before sizing real trades.
+#
+# Every id here must be a valid `ccxt.async_support` exchange id -- ccxt
+# adds/removes/renames exchanges between releases (e.g. BitMart is not
+# present as of the ccxt version this was written against), so if
+# `RestManager.connect_all()` logs "ccxt has no exchange named ...", check
+# the installed ccxt's `ccxt.async_support.exchanges` list and fix the id
+# here rather than assuming the venue itself is unreachable.
 # ---------------------------------------------------------------------------
 
 CEX_VENUES: dict[str, CexVenue] = {
@@ -80,7 +87,6 @@ CEX_VENUES: dict[str, CexVenue] = {
         CexVenue("gemini", "Gemini", 0.0035, 0.0010, {"BTC": 0.0002, "ETH": 0.0020, "USDT": 2.5}, 10, 600, True, False, False),
         CexVenue("bingx", "BingX", 0.0010, 0.0010, {"BTC": 0.0002, "ETH": 0.0015, "USDT": 1.0}, 5, 600, True, True, True),
         CexVenue("cryptocom", "Crypto.com", 0.0040, 0.0040, {"BTC": 0.0004, "ETH": 0.0015, "USDT": 1.0}, 10, 300, True, True, True),
-        CexVenue("bitmart", "BitMart", 0.0025, 0.0025, {"BTC": 0.0005, "ETH": 0.0020, "USDT": 1.0}, 5, 600, True, False, False),
         CexVenue("lbank", "LBank", 0.0010, 0.0010, {"BTC": 0.0005, "ETH": 0.0020, "USDT": 1.0}, 5, 300, True, False, False),
         CexVenue("phemex", "Phemex", 0.0010, 0.0010, {"BTC": 0.0002, "ETH": 0.0015, "USDT": 1.0}, 5, 600, True, True, True),
         # WOO X's maker fee is a representative negative rebate (VIP maker-rebate tier).

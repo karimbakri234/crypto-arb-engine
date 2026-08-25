@@ -45,7 +45,7 @@ QUOTE_ASSETS = ("USDT", "USDC")
 
 
 def build_synthetic_market_state(seed: int = 42) -> MarketState:
-    """Build a synthetic full-universe snapshot: 70 coins x 20 CEX venues,
+    """Build a synthetic full-universe snapshot: 70 coins x 19 CEX venues,
     plus perp books, funding rates, futures curves, and DEX pools for the
     non-spot strategies."""
     rng = random.Random(seed)
