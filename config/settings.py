@@ -105,6 +105,17 @@ DECAY_CHECK_DELAYS_SEC: tuple[float, ...] = (0.1, 0.5, 2.0)
 METRICS_HTTP_PORT: int = int(os.getenv("METRICS_HTTP_PORT", "9100"))
 METRICS_LOG_DUMP_INTERVAL_SEC: float = 30.0
 
+# ---------------------------------------------------------------------------
+# Local dashboard (dashboard/server.py) -- a control plane for a running
+# engine process, not a hosted service. Binds to localhost by default;
+# only change DASHBOARD_HOST if you understand the risk of exposing a
+# mode-switching, order-arming API beyond your own machine.
+# ---------------------------------------------------------------------------
+
+DASHBOARD_ENABLED: bool = os.getenv("DASHBOARD_ENABLED", "true").strip().lower() != "false"
+DASHBOARD_HOST: str = os.getenv("DASHBOARD_HOST", "127.0.0.1")
+DASHBOARD_PORT: int = int(os.getenv("DASHBOARD_PORT", "8420"))
+
 
 @dataclass(slots=True)
 class Settings:

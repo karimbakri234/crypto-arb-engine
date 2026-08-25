@@ -1,0 +1,476 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>crypto-arb-engine — dashboard</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Unbounded:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#0B0E14; --surface:#12161F; --surface-2:#1A1F2C; --surface-3:#222838;
+  --border:#262C3A; --border-soft:#1C212D;
+  --text:#E8EAF0; --text-dim:#8891A5; --text-faint:#545D72;
+  --accent:#E0A845; --accent-soft:rgba(224,168,69,0.14); --accent-line:rgba(224,168,69,0.35);
+  --profit:#4FD1A5; --profit-soft:rgba(79,209,165,0.14);
+  --loss:#F2637A; --loss-soft:rgba(242,99,122,0.14);
+  --warning:#F0B94D; --warning-soft:rgba(240,185,77,0.14);
+  --critical:#FF5468; --critical-soft:rgba(255,84,104,0.16);
+  --radius-sm:3px; --radius-md:5px;
+  --font-display:"Unbounded","Arial Narrow",sans-serif;
+  --font-body:"IBM Plex Sans","Segoe UI",sans-serif;
+  --font-mono:"IBM Plex Mono","SFMono-Regular",Consolas,monospace;
+}
+*{ box-sizing:border-box; }
+html,body{ margin:0; padding:0; }
+body{ background:var(--bg); color:var(--text); font-family:var(--font-body); font-size:13.5px; line-height:1.5; }
+h1,h2{ font-family:var(--font-display); font-weight:600; margin:0; }
+.mono{ font-family:var(--font-mono); font-variant-numeric:tabular-nums; }
+a{ color:var(--accent); }
+button{ font-family:inherit; }
+:focus-visible{ outline:2px solid var(--accent); outline-offset:2px; }
+
+.app{ min-height:100vh; display:flex; flex-direction:column; }
+.topbar{ display:flex; align-items:center; gap:16px; padding:12px 20px; border-bottom:1px solid var(--border); background:linear-gradient(180deg,var(--surface),var(--bg)); flex-wrap:wrap; }
+.brand{ display:flex; align-items:baseline; gap:10px; margin-right:auto; }
+.brand h1{ font-size:16px; letter-spacing:0.02em; }
+.conn-badge{ display:inline-flex; align-items:center; gap:6px; border:1px solid var(--border); background:var(--surface-2); color:var(--text-dim); padding:3px 9px; border-radius:999px; font-family:var(--font-mono); font-size:10.5px; letter-spacing:0.05em; text-transform:uppercase; }
+.conn-badge::before{ content:""; width:6px; height:6px; border-radius:50%; background:var(--text-faint); }
+.conn-badge.live{ border-color:var(--profit-soft); background:var(--profit-soft); color:var(--profit); }
+.conn-badge.live::before{ background:var(--profit); }
+.conn-badge.down{ border-color:var(--critical); background:var(--critical-soft); color:var(--critical); }
+.conn-badge.down::before{ background:var(--critical); animation:blink 1s steps(2) infinite; }
+@keyframes blink{ 50%{ opacity:0.25; } }
+.mode-badge{ font-family:var(--font-mono); font-size:11px; text-transform:uppercase; letter-spacing:0.05em; padding:3px 10px; border-radius:999px; }
+.mode-badge.monitor{ background:var(--surface-3); color:var(--text-dim); }
+.mode-badge.paper{ background:var(--accent-soft); color:var(--accent); }
+.mode-badge.live{ background:var(--critical-soft); color:var(--critical); }
+.estop-btn{ border:1px solid var(--critical); background:var(--critical-soft); color:var(--critical); font-family:var(--font-mono); font-weight:600; font-size:11.5px; letter-spacing:0.05em; padding:9px 14px; border-radius:var(--radius-md); cursor:pointer; text-transform:uppercase; }
+.estop-btn:hover{ background:var(--critical); color:#1a0508; }
+.estop-btn.tripped{ background:var(--critical); color:#1a0508; animation:pulse 1.4s ease-in-out infinite; }
+@keyframes pulse{ 0%,100%{ box-shadow:0 0 0 0 rgba(255,84,104,0.5); } 50%{ box-shadow:0 0 0 6px rgba(255,84,104,0); } }
+@media (prefers-reduced-motion:reduce){ .estop-btn.tripped{ animation:none; } }
+
+.halt-banner{ display:none; align-items:center; gap:10px; background:var(--critical-soft); border-bottom:1px solid var(--critical); color:var(--critical); padding:8px 20px; font-size:12.5px; }
+.halt-banner.show{ display:flex; }
+.halt-banner button{ margin-left:auto; border:1px solid var(--critical); background:transparent; color:var(--critical); padding:5px 10px; border-radius:var(--radius-sm); cursor:pointer; font-family:var(--font-mono); font-size:11px; }
+.toast{ position:fixed; bottom:20px; right:20px; background:var(--surface-3); border:1px solid var(--critical); color:var(--text); padding:12px 16px; border-radius:var(--radius-md); max-width:360px; font-size:12.5px; z-index:80; display:none; }
+.toast.show{ display:block; }
+
+.workspace{ flex:1; display:grid; grid-template-columns:268px 1fr; align-items:start; }
+@media (max-width:880px){ .workspace{ grid-template-columns:1fr; } }
+.rail{ border-right:1px solid var(--border); padding:18px 16px; display:flex; flex-direction:column; gap:20px; position:sticky; top:0; }
+@media (max-width:880px){ .rail{ position:static; border-right:none; border-bottom:1px solid var(--border); } }
+.rail-group{ display:flex; flex-direction:column; gap:8px; }
+.rail-label{ font-size:10.5px; text-transform:uppercase; letter-spacing:0.08em; color:var(--text-faint); }
+.segmented{ display:flex; background:var(--surface); border:1px solid var(--border); border-radius:var(--radius-md); padding:3px; }
+.segmented button{ flex:1; border:none; background:transparent; color:var(--text-dim); padding:8px 6px; border-radius:3px; font-size:11.5px; font-family:var(--font-mono); letter-spacing:0.03em; cursor:pointer; text-transform:uppercase; }
+.segmented button.active[data-mode="monitor"]{ background:var(--surface-3); color:var(--text); }
+.segmented button.active[data-mode="paper"]{ background:var(--accent-soft); color:var(--accent); }
+.segmented button.active[data-mode="live"]{ background:var(--critical-soft); color:var(--critical); }
+.run-toggle{ display:flex; align-items:center; justify-content:space-between; gap:10px; background:var(--surface); border:1px solid var(--border); border-radius:var(--radius-md); padding:10px 12px; }
+.run-toggle span{ font-size:12px; color:var(--text-dim); }
+.switch{ position:relative; width:36px; height:20px; flex:none; }
+.switch input{ opacity:0; width:0; height:0; }
+.switch .track{ position:absolute; inset:0; background:var(--surface-3); border:1px solid var(--border); border-radius:999px; cursor:pointer; transition:background .15s; }
+.switch .track::after{ content:""; position:absolute; width:14px; height:14px; border-radius:50%; background:var(--text-faint); top:2px; left:2px; transition:transform .15s, background .15s; }
+.switch input:checked + .track{ background:var(--profit-soft); border-color:var(--profit); }
+.switch input:checked + .track::after{ transform:translateX(16px); background:var(--profit); }
+.field{ display:flex; flex-direction:column; gap:5px; }
+.field label{ font-size:11px; color:var(--text-dim); }
+.field input[type="number"]{ width:100%; background:var(--surface); border:1px solid var(--border); color:var(--text); padding:8px 9px; border-radius:var(--radius-sm); font-family:var(--font-mono); font-size:12.5px; }
+.save-limits-btn{ margin-top:2px; border:1px solid var(--accent-line); background:var(--accent-soft); color:var(--accent); font-family:var(--font-mono); font-size:11px; letter-spacing:0.04em; text-transform:uppercase; padding:8px; border-radius:var(--radius-sm); cursor:pointer; }
+.save-limits-btn:hover{ background:var(--accent); color:#2A1D06; }
+.rail-footnote{ font-size:10.5px; color:var(--text-faint); border-top:1px solid var(--border-soft); padding-top:12px; }
+
+.main{ padding:20px; display:flex; flex-direction:column; gap:18px; min-width:0; }
+.stat-row{ display:grid; grid-template-columns:repeat(5,1fr); gap:10px; }
+@media (max-width:1180px){ .stat-row{ grid-template-columns:repeat(3,1fr); } }
+@media (max-width:620px){ .stat-row{ grid-template-columns:repeat(2,1fr); } }
+.stat{ background:var(--surface); border:1px solid var(--border); border-radius:var(--radius-md); padding:12px 14px; display:flex; flex-direction:column; gap:6px; }
+.stat .k{ font-size:10.5px; text-transform:uppercase; letter-spacing:0.07em; color:var(--text-faint); }
+.stat .v{ font-family:var(--font-mono); font-size:19px; font-weight:500; }
+.stat .v.profit{ color:var(--profit); } .stat .v.loss{ color:var(--loss); }
+.stat .sub{ font-size:11px; color:var(--text-dim); }
+
+.grid-2{ display:grid; grid-template-columns:1.3fr 1fr; gap:14px; align-items:start; }
+@media (max-width:980px){ .grid-2{ grid-template-columns:1fr; } }
+.panel{ background:var(--surface); border:1px solid var(--border); border-radius:var(--radius-md); overflow:hidden; }
+.panel-head{ display:flex; align-items:center; justify-content:space-between; gap:10px; padding:11px 14px; border-bottom:1px solid var(--border-soft); }
+.panel-head h2{ font-size:12px; font-family:var(--font-body); font-weight:600; text-transform:uppercase; letter-spacing:0.05em; color:var(--text-dim); }
+.panel-head .note{ font-size:10.5px; color:var(--text-faint); }
+.panel-body{ padding:12px 14px; }
+
+.feed{ max-height:440px; overflow-y:auto; }
+.feed-row{ display:grid; grid-template-columns:1fr auto; gap:10px; align-items:center; padding:8px 14px; border-bottom:1px solid var(--border-soft); font-size:12px; animation:rowIn .35s ease-out; }
+@keyframes rowIn{ from{ background:var(--accent-soft); } to{ background:transparent; } }
+.feed-row:last-child{ border-bottom:none; }
+.feed-route{ color:var(--text); display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
+.feed-route .tag{ font-family:var(--font-mono); font-size:10px; text-transform:uppercase; letter-spacing:0.03em; color:var(--text-dim); background:var(--surface-2); border:1px solid var(--border); border-radius:999px; padding:1px 7px; }
+.feed-net{ font-family:var(--font-mono); font-weight:500; text-align:right; }
+.feed-net.profit{ color:var(--profit); } .feed-net.warn{ color:var(--warning); }
+.feed-empty{ padding:30px 14px; text-align:center; color:var(--text-faint); font-size:12px; }
+
+.hbar-row{ display:grid; grid-template-columns:118px 1fr 64px; gap:10px; align-items:center; padding:7px 0; }
+.hbar-row .label{ font-size:11px; color:var(--text-dim); }
+.hbar-track{ position:relative; height:8px; background:var(--surface-2); border-radius:999px; }
+.hbar-fill{ position:absolute; inset:0 auto 0 0; border-radius:999px; background:var(--accent); transition:width .3s; }
+.hbar-fill.warn{ background:var(--warning); } .hbar-fill.crit{ background:var(--critical); }
+.hbar-val{ font-family:var(--font-mono); font-size:11px; text-align:right; color:var(--text); }
+
+.decay-bars{ display:flex; gap:14px; align-items:flex-end; height:100px; }
+.decay-col{ flex:1; display:flex; flex-direction:column; align-items:center; gap:6px; height:100%; justify-content:flex-end; }
+.decay-bar{ width:100%; max-width:46px; border-radius:3px 3px 0 0; background:var(--accent); transition:height .3s; }
+.decay-pct{ font-family:var(--font-mono); font-size:12px; color:var(--text); }
+.decay-lbl{ font-size:10px; color:var(--text-faint); font-family:var(--font-mono); }
+.decay-empty{ color:var(--text-faint); font-size:12px; }
+
+.strategy-grid{ display:grid; grid-template-columns:repeat(auto-fill,minmax(210px,1fr)); gap:10px; }
+.strategy-card{ background:var(--surface-2); border:1px solid var(--border); border-radius:var(--radius-md); padding:11px 12px; display:flex; align-items:center; justify-content:space-between; gap:8px; }
+.strategy-card.disabled{ opacity:0.5; }
+.strategy-name{ font-size:12.5px; font-weight:500; }
+
+.venue-grid{ display:grid; grid-template-columns:repeat(auto-fill,minmax(120px,1fr)); gap:8px; }
+.venue-chip{ display:flex; align-items:center; gap:8px; background:var(--surface-2); border:1px solid var(--border); border-radius:var(--radius-sm); padding:8px 10px; font-size:11.5px; }
+.venue-dot{ width:7px; height:7px; border-radius:50%; background:var(--profit); box-shadow:0 0 0 3px var(--profit-soft); }
+
+.modal-backdrop{ display:none; position:fixed; inset:0; background:rgba(4,5,9,0.72); z-index:50; align-items:center; justify-content:center; padding:20px; }
+.modal-backdrop.show{ display:flex; }
+.modal{ background:var(--surface); border:1px solid var(--critical); border-radius:var(--radius-md); max-width:460px; width:100%; padding:20px; display:flex; flex-direction:column; gap:14px; }
+.modal h3{ color:var(--critical); font-size:15px; font-family:var(--font-display); }
+.modal p{ font-size:12.5px; color:var(--text-dim); margin:0; line-height:1.6; }
+.modal ul{ margin:0; padding-left:18px; font-size:12px; color:var(--text-dim); display:flex; flex-direction:column; gap:5px; }
+.modal-actions{ display:flex; gap:10px; justify-content:flex-end; margin-top:4px; }
+.btn{ font-family:var(--font-mono); font-size:11.5px; letter-spacing:0.03em; text-transform:uppercase; padding:9px 14px; border-radius:var(--radius-sm); cursor:pointer; border:1px solid var(--border); background:var(--surface-2); color:var(--text); }
+.btn.ghost:hover{ background:var(--surface-3); }
+.btn.danger{ background:var(--critical); border-color:var(--critical); color:#1a0508; font-weight:600; }
+.confirm-check{ display:flex; align-items:center; gap:8px; font-size:12px; color:var(--text-dim); }
+
+footer{ border-top:1px solid var(--border); padding:16px 20px; font-size:11.5px; color:var(--text-faint); }
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="topbar">
+    <div class="brand"><h1>ARB ENGINE — DASHBOARD</h1></div>
+    <span class="conn-badge" id="connBadge">connecting…</span>
+    <span class="mode-badge monitor" id="modeBadge">MONITOR</span>
+    <button class="estop-btn" id="estopBtn">Emergency Stop</button>
+  </div>
+
+  <div class="halt-banner" id="haltBanner">
+    <strong>●</strong> <span id="haltMsg">Halted.</span>
+    <button id="haltClear">Clear</button>
+  </div>
+
+  <div class="workspace">
+    <aside class="rail">
+      <div class="rail-group">
+        <span class="rail-label">Run mode</span>
+        <div class="segmented" id="modeSeg">
+          <button data-mode="monitor" class="active">Monitor</button>
+          <button data-mode="paper">Paper</button>
+          <button data-mode="live">Live</button>
+        </div>
+      </div>
+      <div class="rail-group">
+        <span class="rail-label">Detection loop</span>
+        <div class="run-toggle">
+          <span id="runLabel">Running</span>
+          <label class="switch"><input type="checkbox" id="runToggle" checked><span class="track"></span></label>
+        </div>
+      </div>
+      <div class="rail-group">
+        <span class="rail-label">Risk limits</span>
+        <div class="field"><label>Max notional / trade (USD)</label><input type="number" id="maxTrade" min="1" step="10"></div>
+        <div class="field"><label>Daily loss limit (USD)</label><input type="number" id="lossLimit" min="1" step="50"></div>
+        <div class="field"><label>Max trades / day</label><input type="number" id="tradeCap" min="1" step="10"></div>
+        <button class="save-limits-btn" id="saveLimits">Update limits</button>
+      </div>
+      <p class="rail-footnote">
+        This page controls a real, locally running <code class="mono">crypto-arb-engine</code> process. Switching to
+        <code class="mono">live</code> arms real market orders against pre-funded exchange balances &mdash; see the
+        README's &ldquo;before running with real money&rdquo; section.
+      </p>
+    </aside>
+
+    <main class="main">
+      <div class="stat-row">
+        <div class="stat"><span class="k">Venues connected</span><span class="v" id="venuesStat">0</span><span class="sub">CEX, via RestManager</span></div>
+        <div class="stat"><span class="k">Symbols tracked</span><span class="v" id="symbolsStat">0</span><span class="sub">order books</span></div>
+        <div class="stat"><span class="k">Daily PnL</span><span class="v mono" id="pnlStat">$0.00</span><span class="sub">net of fees</span></div>
+        <div class="stat"><span class="k">Trades today</span><span class="v" id="tradesStat">0</span><span class="sub">of <span id="tradeCapStat">-</span> cap</span></div>
+        <div class="stat"><span class="k">Consecutive failures</span><span class="v" id="failStat">0</span><span class="sub">kill-switch counter</span></div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head"><h2>Strategies</h2><span class="note">toggle to include/exclude from the live scan</span></div>
+        <div class="panel-body strategy-grid" id="strategyGrid"></div>
+      </div>
+
+      <div class="grid-2">
+        <div class="panel">
+          <div class="panel-head"><h2>Opportunity feed</h2><span class="note">live, all strategies</span></div>
+          <div class="feed" id="feed"></div>
+        </div>
+        <div style="display:flex; flex-direction:column; gap:14px;">
+          <div class="panel">
+            <div class="panel-head"><h2>Latency budget</h2><span class="note mono">p95, ms</span></div>
+            <div class="panel-body" id="latencyPanel"><p class="decay-empty">Waiting for detection ticks&hellip;</p></div>
+          </div>
+          <div class="panel">
+            <div class="panel-head"><h2>Decay curve</h2><span class="note">capturable after delay</span></div>
+            <div class="panel-body"><div class="decay-bars" id="decayBars"><p class="decay-empty">No decay checks recorded yet.</p></div></div>
+          </div>
+          <div class="panel">
+            <div class="panel-head"><h2>Connected venues</h2></div>
+            <div class="panel-body venue-grid" id="venueGrid"></div>
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <footer>Local control plane for a real bot process. Not exposed to the internet by default — see README.</footer>
+</div>
+
+<div class="modal-backdrop" id="liveModal">
+  <div class="modal">
+    <h3>Switch to LIVE mode?</h3>
+    <p>This is not a simulation. The engine will fire real market orders against balances that must already be pre-funded on every connected exchange:</p>
+    <ul>
+      <li>Pre-funded balances on both sides of every trade are mandatory — there is no buy-transfer-sell path fast enough to catch a spread.</li>
+      <li>Partial / one-sided fills need manual reconciliation (see execution/reconciler.py).</li>
+      <li>Only trade with capital you can afford to lose.</li>
+    </ul>
+    <label class="confirm-check"><input type="checkbox" id="liveConfirmCheck"> I understand this fires real orders with real money.</label>
+    <div class="modal-actions">
+      <button class="btn ghost" id="liveCancel">Cancel</button>
+      <button class="btn danger" id="liveConfirm" disabled>Confirm Live</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+(function(){
+  "use strict";
+  var LATENCY_BUDGETS = {feed_to_state: 2, state_to_detect: 5, detect_to_decision: 2, decision_to_ack: 250};
+  var STAGE_LABELS = {feed_to_state:"feed → state", state_to_detect:"state → detect", detect_to_decision:"detect → decision", decision_to_ack:"decision → ack"};
+
+  function $(sel){ return document.querySelector(sel); }
+  function $all(sel){ return Array.prototype.slice.call(document.querySelectorAll(sel)); }
+  function fmtUsd(n){ n = Number(n)||0; return (n<0?"-":"") + "$" + Math.abs(n).toFixed(2); }
+  function fmtTime(ts){
+    var d = ts ? new Date(ts*1000) : new Date();
+    function pad(x){ return String(x).padStart(2,"0"); }
+    return pad(d.getHours())+":"+pad(d.getMinutes())+":"+pad(d.getSeconds());
+  }
+
+  function showToast(msg){
+    var t = $("#toast");
+    t.textContent = msg;
+    t.classList.add("show");
+    clearTimeout(showToast._h);
+    showToast._h = setTimeout(function(){ t.classList.remove("show"); }, 6000);
+  }
+
+  async function api(path, opts){
+    var res = await fetch(path, Object.assign({headers:{"Content-Type":"application/json"}}, opts||{}));
+    var data = null;
+    try{ data = await res.json(); }catch(e){}
+    if(!res.ok){
+      var msg = (data && data.detail) ? data.detail : ("Request failed: " + res.status);
+      throw new Error(msg);
+    }
+    return data;
+  }
+
+  function applyState(s){
+    $all("#modeSeg button").forEach(function(b){ b.classList.toggle("active", b.getAttribute("data-mode") === s.mode); });
+    var badge = $("#modeBadge");
+    badge.textContent = s.mode.toUpperCase();
+    badge.className = "mode-badge " + s.mode;
+
+    $("#runToggle").checked = s.running;
+    $("#runLabel").textContent = s.running ? "Running" : "Stopped";
+
+    if(document.activeElement !== $("#maxTrade")) $("#maxTrade").value = s.risk_limits.max_notional_per_trade_usd;
+    if(document.activeElement !== $("#lossLimit")) $("#lossLimit").value = s.risk_limits.daily_loss_limit_usd;
+    if(document.activeElement !== $("#tradeCap")) $("#tradeCap").value = s.risk_limits.max_trades_per_day;
+
+    $("#venuesStat").textContent = s.connected_venues.length;
+    $("#symbolsStat").textContent = s.symbols_tracked;
+    $("#pnlStat").textContent = fmtUsd(s.daily_pnl_usd);
+    $("#pnlStat").className = "v mono " + (s.daily_pnl_usd > 0 ? "profit" : (s.daily_pnl_usd < 0 ? "loss" : ""));
+    $("#tradesStat").textContent = s.daily_trade_count;
+    $("#tradeCapStat").textContent = s.risk_limits.max_trades_per_day;
+    $("#failStat").textContent = s.consecutive_failures;
+
+    var haltReason = s.emergency_stop ? "Emergency stop engaged" : (!s.running ? "Stopped" : null);
+    var banner = $("#haltBanner");
+    if(haltReason){ banner.classList.add("show"); $("#haltMsg").textContent = haltReason; }
+    else{ banner.classList.remove("show"); }
+    $("#estopBtn").classList.toggle("tripped", !!s.emergency_stop);
+
+    var grid = $("#strategyGrid");
+    grid.innerHTML = "";
+    s.strategies.forEach(function(st){
+      var card = document.createElement("div");
+      card.className = "strategy-card" + (st.enabled ? "" : " disabled");
+      card.innerHTML =
+        '<span class="strategy-name">'+st.name+'</span>'+
+        '<label class="switch"><input type="checkbox" data-strategy="'+st.name+'" '+(st.enabled?"checked":"")+'><span class="track"></span></label>';
+      grid.appendChild(card);
+    });
+    grid.querySelectorAll("input[data-strategy]").forEach(function(inp){
+      inp.addEventListener("change", function(){
+        api("/api/strategy/" + encodeURIComponent(inp.getAttribute("data-strategy")), {method:"POST", body: JSON.stringify({enabled: inp.checked})})
+          .catch(function(e){ showToast(e.message); inp.checked = !inp.checked; });
+      });
+    });
+
+    var venueGrid = $("#venueGrid");
+    venueGrid.innerHTML = s.connected_venues.map(function(v){
+      return '<div class="venue-chip"><span class="venue-dot"></span><span>'+v+'</span></div>';
+    }).join("") || '<span class="decay-empty">None connected.</span>';
+
+    renderLatency(s.metrics && s.metrics.latency);
+  }
+
+  function renderLatency(latency){
+    var wrap = $("#latencyPanel");
+    if(!latency || Object.keys(latency).length === 0){
+      wrap.innerHTML = '<p class="decay-empty">Waiting for detection ticks&hellip;</p>';
+      return;
+    }
+    wrap.innerHTML = "";
+    Object.keys(STAGE_LABELS).forEach(function(stage){
+      var s = latency[stage];
+      var budget = LATENCY_BUDGETS[stage];
+      var p95 = s ? s.p95_ms : 0;
+      var pct = Math.min(p95 / budget, 1.4);
+      var cls = pct > 1 ? "crit" : (pct > 0.75 ? "warn" : "");
+      var row = document.createElement("div");
+      row.className = "hbar-row";
+      row.innerHTML =
+        '<span class="label">'+STAGE_LABELS[stage]+'</span>'+
+        '<div class="hbar-track"><div class="hbar-fill '+cls+'" style="width:'+Math.min(pct,1)*100+'%"></div></div>'+
+        '<span class="hbar-val">'+p95.toFixed(2)+'ms</span>';
+      wrap.appendChild(row);
+    });
+  }
+
+  function renderDecay(summary){
+    var wrap = $("#decayBars");
+    var keys = Object.keys(summary || {});
+    if(keys.length === 0){ wrap.innerHTML = '<p class="decay-empty">No decay checks recorded yet.</p>'; return; }
+    wrap.innerHTML = "";
+    keys.sort(function(a,b){ return Number(a)-Number(b); }).forEach(function(k){
+      var v = summary[k];
+      var pct = v == null ? 0 : v * 100;
+      var col = document.createElement("div");
+      col.className = "decay-col";
+      col.innerHTML =
+        '<span class="decay-pct">'+(v==null?"—":pct.toFixed(0)+"%")+'</span>'+
+        '<div class="decay-bar" style="height:'+Math.max(4,pct)+'%"></div>'+
+        '<span class="decay-lbl">'+Math.round(Number(k)*1000)+'ms</span>';
+      wrap.appendChild(col);
+    });
+  }
+
+  function renderFeedEntries(entries, prepend){
+    var wrap = $("#feed");
+    if(wrap.querySelector(".feed-empty")) wrap.innerHTML = "";
+    var html = entries.map(function(o){
+      var netClass = o.net_profit_pct >= 0.3 ? "profit" : "warn";
+      return '<div class="feed-row">'+
+        '<span class="feed-route"><span class="tag">'+o.strategy+'</span>'+(o.symbol||"")+
+        ' &middot; '+(o.venues||[]).join(" → ")+'</span>'+
+        '<span class="feed-net '+netClass+'">+'+Number(o.net_profit_pct).toFixed(3)+'%</span>'+
+      '</div>';
+    }).join("");
+    if(prepend) wrap.insertAdjacentHTML("afterbegin", html);
+    else wrap.innerHTML = html || '<div class="feed-empty">No opportunities recorded yet.</div>';
+    while(wrap.children.length > 60) wrap.removeChild(wrap.lastChild);
+  }
+
+  /* ---------------- controls ---------------- */
+  $all("#modeSeg button").forEach(function(btn){
+    btn.addEventListener("click", function(){
+      var mode = btn.getAttribute("data-mode");
+      if(mode === "live"){ $("#liveModal").classList.add("show"); return; }
+      api("/api/mode", {method:"POST", body: JSON.stringify({mode: mode})})
+        .then(applyState).catch(function(e){ showToast(e.message); });
+    });
+  });
+  $("#liveConfirmCheck").addEventListener("change", function(e){ $("#liveConfirm").disabled = !e.target.checked; });
+  $("#liveCancel").addEventListener("click", function(){ $("#liveModal").classList.remove("show"); $("#liveConfirmCheck").checked = false; $("#liveConfirm").disabled = true; });
+  $("#liveConfirm").addEventListener("click", function(){
+    api("/api/mode", {method:"POST", body: JSON.stringify({mode:"live", confirm:true})})
+      .then(function(s){ applyState(s); $("#liveModal").classList.remove("show"); })
+      .catch(function(e){ showToast(e.message); });
+  });
+  $("#runToggle").addEventListener("change", function(e){
+    api("/api/run", {method:"POST", body: JSON.stringify({running: e.target.checked})})
+      .then(applyState).catch(function(err){ showToast(err.message); e.target.checked = !e.target.checked; });
+  });
+  $("#estopBtn").addEventListener("click", function(){
+    api("/api/emergency_stop", {method:"POST"}).then(applyState).catch(function(e){ showToast(e.message); });
+  });
+  $("#haltClear").addEventListener("click", function(){
+    api("/api/emergency_stop/clear", {method:"POST"}).then(applyState).catch(function(e){ showToast(e.message); });
+  });
+  $("#saveLimits").addEventListener("click", function(){
+    api("/api/risk_limits", {method:"POST", body: JSON.stringify({
+      max_notional_per_trade_usd: Number($("#maxTrade").value),
+      daily_loss_limit_usd: Number($("#lossLimit").value),
+      max_trades_per_day: Number($("#tradeCap").value)
+    })}).then(function(s){ applyState(s); showToast("Risk limits updated."); }).catch(function(e){ showToast(e.message); });
+  });
+
+  /* ---------------- websocket ---------------- */
+  var ws = null, reconnectDelay = 1000;
+  function connectWs(){
+    var proto = location.protocol === "https:" ? "wss:" : "ws:";
+    ws = new WebSocket(proto + "//" + location.host + "/ws");
+    ws.addEventListener("open", function(){
+      reconnectDelay = 1000;
+      $("#connBadge").textContent = "live"; $("#connBadge").className = "conn-badge live";
+    });
+    ws.addEventListener("close", function(){
+      $("#connBadge").textContent = "disconnected"; $("#connBadge").className = "conn-badge down";
+      setTimeout(connectWs, reconnectDelay);
+      reconnectDelay = Math.min(reconnectDelay * 1.6, 15000);
+    });
+    ws.addEventListener("error", function(){ ws.close(); });
+    ws.addEventListener("message", function(ev){
+      var msg = JSON.parse(ev.data);
+      if(msg.type === "state") applyState(msg.data);
+      else if(msg.type === "tick"){
+        applyState(msg.data.stats);
+        if(msg.data.opportunities && msg.data.opportunities.length) renderFeedEntries(msg.data.opportunities, true);
+      }
+    });
+  }
+
+  /* ---------------- init ---------------- */
+  Promise.all([
+    api("/api/state"),
+    api("/api/opportunities?limit=50"),
+    api("/api/decay_summary")
+  ]).then(function(results){
+    applyState(results[0]);
+    renderFeedEntries(results[1], false);
+    renderDecay(results[2]);
+  }).catch(function(e){ showToast("Could not load initial state: " + e.message); });
+
+  setInterval(function(){ api("/api/decay_summary").then(renderDecay).catch(function(){}); }, 15000);
+
+  connectWs();
+})();
+</script>
+</body>
+</html>

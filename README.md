@@ -26,6 +26,7 @@ cp .env.example .env   # then fill in real API keys / RPC URLs
 - RPC endpoints per chain: `ETH_RPC_URL`, `ARBITRUM_RPC_URL`, `BASE_RPC_URL`, `POLYGON_RPC_URL`, `BSC_RPC_URL`, `SOLANA_RPC_URL`.
 - Aggregator API keys (optional): `ONEINCH_API_KEY`, `ZEROX_API_KEY`, `JUPITER_API_KEY`, `ODOS_API_KEY`.
 - Risk overrides: `MAX_TRADE_USD`, `DAILY_LOSS_LIMIT_USD`, `MAX_TRADES_PER_DAY`, `MAX_CONSECUTIVE_FAILURES`.
+- Dashboard: `DASHBOARD_ENABLED` (default `true`), `DASHBOARD_HOST` (default `127.0.0.1`), `DASHBOARD_PORT` (default `8420`) — see [Local dashboard](#local-dashboard).
 
 All credentials load via `python-dotenv` from a local `.env`. Nothing is hardcoded.
 
@@ -39,15 +40,24 @@ ARB_MODE=live python main.py      # real orders against pre-funded inventory -- 
 
 A `/metrics` HTTP endpoint (`METRICS_HTTP_PORT`, default 9100) serves a JSON snapshot of latency histograms, hit rates, and PnL attribution; the same snapshot is also logged periodically.
 
+## Local dashboard
+
+`main.py` also starts a small control-plane dashboard (`dashboard/`) in the same process, bound to `http://127.0.0.1:8420` by default. Open that URL in a browser while the bot is running to see live opportunities, per-strategy toggles, latency/decay charts, and connected venues, and to control the running process: switch mode (monitor/paper/live), start/stop the detection loop, pull the emergency stop, and adjust risk limits.
+
+**This is a real control plane for a real process, not a demo.** It reads and mutates the exact same `RiskManager`, `ControlState`, and strategy list the detection loop uses — there is no separate database or simulation layer. Switching to `live` from this page has the identical real-money consequences as setting `ARB_MODE=live` in `.env`: the next opportunity the loop finds fires real market orders against whatever balances are pre-funded on the connected exchanges. The dashboard's own `POST /api/mode` route refuses to arm `live` without an explicit `confirm: true`, and the page shows the same pre-funded-balance warning before letting you check that box — but that's a safety rail, not a substitute for reading [Before running with real money](#before-running-with-real-money) first.
+
+It binds to localhost only (`DASHBOARD_HOST=127.0.0.1`) and is meant to be viewed from the same machine the bot runs on. Set `DASHBOARD_ENABLED=false` to disable it entirely, or change `DASHBOARD_HOST`/`DASHBOARD_PORT` if you understand the risk of exposing a mode-switching, order-arming API beyond your own machine — the default is deliberately conservative.
+
 ## Project structure
 
 ```
 config/     tunables, tiered asset universe, CEX/DEX venue definitions
-core/       order book state, feed multiplexer, REST fallback, currency graph, typed structs, market snapshot
+core/       order book state, feed multiplexer, REST fallback, currency graph, typed structs, market snapshot, live control state
 strategies/ 15 arbitrage strategies, one file each, all implementing strategies.base.Strategy
 execution/  router, monitor/paper/live executor, inventory tracking, one-sided-fill reconciler
 risk/       declarative limits + enforcement (capital, exposure, circuit breakers)
 analytics/  latency/hit-rate/PnL metrics, parquet opportunity recorder with decay-curve tracking
+dashboard/  local control-plane API + frontend for a running engine process (see "Local dashboard" above)
 benchmarks/ synthetic full-universe detection throughput benchmark
 tests/      pytest suite, one module per strategy + core + execution/risk, plus hypothesis property tests
 main.py     async entry point
@@ -57,7 +67,7 @@ main.py     async entry point
 
 `config/universe.py` defines a 4-tier universe (10 majors, 20 large-caps, 30 mid-caps, plus 7 stablecoins and 10 wrapped/LST assets — 70+ base assets total) with per-tier poll intervals and profit thresholds (`config/settings.TIER_CONFIG`). The *tradeable symbol list* is never hardcoded as pair strings: `build_tradeable_symbols` intersects each venue's actual listed markets (from `load_markets()`) with this universe, across 5 quote assets (USDT, USDC, BTC, ETH, EUR).
 
-`config/venues.py` defines 20 CEX venues (binance, coinbase, kraken, bybit, okx, kucoin, bitget, gate, mexc, htx, bitfinex, bitstamp, gemini, bingx, cryptocom, bitmart, lbank, phemex, woo, deribit) and 13 DEX venues across 6 chains (Ethereum, BSC, Solana, Arbitrum, Base, Polygon), each with taker/maker fees, withdrawal fees, minimum order sizes, rate limits, and websocket support flags.
+`config/venues.py` defines 19 CEX venues (binance, coinbase, kraken, bybit, okx, kucoin, bitget, gate, mexc, htx, bitfinex, bitstamp, gemini, bingx, cryptocom, lbank, phemex, woo, deribit) and 13 DEX venues across 6 chains (Ethereum, BSC, Solana, Arbitrum, Base, Polygon), each with taker/maker fees, withdrawal fees, minimum order sizes, rate limits, and websocket support flags. Every CEX id is validated against `ccxt.async_support`'s exchange list; ccxt adds/drops exchanges between releases, so `RestManager` logs and skips (rather than crashes on) an id ccxt no longer recognizes.
 
 ## Strategies
 
@@ -94,25 +104,25 @@ All 15 strategies implement `strategies.base.Strategy.scan(market_state) -> list
 
 ### Benchmark numbers
 
-Measured with `python -m benchmarks.bench_detection` on a synthetic snapshot at **140 symbols x 20 venues (2,800 order books)** — above the 50-coin x 15-venue design target. Numbers are from one run on this machine; absolute throughput will vary by hardware, but the *relative* cost of vectorized-matrix strategies vs. graph-search strategies is the architecturally interesting comparison:
+Measured with `python -m benchmarks.bench_detection` on a synthetic snapshot at **140 symbols x 19 venues (2,660 order books)** — above the 50-coin x 15-venue design target. Numbers are from one run on this machine; absolute throughput will vary by hardware, but the *relative* cost of vectorized-matrix strategies vs. graph-search strategies is the architecturally interesting comparison:
 
 ```
 strategy                scans/sec  avg ms/scan  avg opps/scan
-cross_exchange               21.3       46.956        6211.00
-triangular                 1087.2        0.920           0.00
-cex_dex                     334.5        2.990           0.00
-dex_dex                    9481.9        0.105          20.00
-funding_rate              11772.9        0.085           0.00
-basis_carry                2240.9        0.446         140.00
-calendar_spread            2312.0        0.433          98.00
-cross_quote                  94.1       10.627           0.00
-stablecoin_depeg            460.8        2.170           0.00
-wrapped_asset               674.0        1.484           0.00
-perp_perp                   609.6        1.641           0.00
-statistical                5712.5        0.175           0.00
-multi_leg                  1013.8        0.986           0.00
-maker_rebate                 87.2       11.474           0.00
-latency_arb                  81.2       12.321           0.00
+cross_exchange               26.0       38.407        5796.00
+triangular                 1158.3        0.863           0.00
+cex_dex                     383.0        2.611           0.00
+dex_dex                    6301.3        0.159          23.00
+funding_rate              14224.6        0.070           0.00
+basis_carry                2548.7        0.392         141.00
+calendar_spread            2806.3        0.356         100.00
+cross_quote                  99.0       10.103           0.00
+stablecoin_depeg            652.1        1.533           0.00
+wrapped_asset               867.5        1.153           0.00
+perp_perp                   782.8        1.277           0.00
+statistical                7141.3        0.140           0.00
+multi_leg                  1254.9        0.797           0.00
+maker_rebate                106.2        9.413           0.00
+latency_arb                 108.9        9.184           0.00
 ```
 
 `cross_exchange` is the slowest per-scan despite being fully vectorized — on this synthetic snapshot (every venue quoting every symbol with a small random spread) it finds **6,211 opportunities per scan**, and constructing that many `Opportunity` Python objects dominates the wall-clock cost, not the numpy matrix math itself. `cross_quote`, `maker_rebate`, and `latency_arb` are the next slowest because they run the vectorized comparison independently per symbol across a 140-symbol loop rather than once globally. `triangular` and `multi_leg` (graph search) land in the middle — cheaper than the busiest matrix strategies here, but architecturally more expensive per comparison than a matrix op; their cost scales with cycle length and venue connectivity rather than symbol count. Re-run `python -m benchmarks.bench_detection` on your own hardware before relying on these numbers.
@@ -165,14 +175,15 @@ Read this section in full before ever setting `ARB_MODE=live`.
 7. **Smart contract risk is real for every DEX leg.** This bot detects and constructs on-chain transactions; it does not audit the AMM/aggregator/bridge contracts it interacts with. The flash-loan-funded same-chain path additionally requires a deployed repay-in-one-transaction contract this Python bot does not provide or audit.
 8. **`latency_arb.py` is close to un-winnable for a Python bot.** It's included because it's a real category, and because feeding its findings into the decay-curve analytics is informative — not because you should expect to capture it. Firms colocated at exchange data centers close this kind of lag in low-single-digit milliseconds.
 9. **`statistical.py` is not arbitrage.** It carries real directional risk and can lose money even when everything is implemented correctly.
-10. **Exchange ToS, tax treatment of arbitrage trading, and local regulation on automated trading all vary by exchange and jurisdiction.** That's on you to check before running anything live.
+10. **The dashboard is a real control surface, not a viewer.** Anyone who can reach `http://<DASHBOARD_HOST>:<DASHBOARD_PORT>` can switch the running process to `live` and arm real orders. The default (`127.0.0.1`) keeps it reachable only from the machine the bot runs on; treat changing that host the same way you'd treat exposing an exchange API key.
+11. **Exchange ToS, tax treatment of arbitrage trading, and local regulation on automated trading all vary by exchange and jurisdiction.** That's on you to check before running anything live.
 
 **Workflow: run `monitor` for days and read the decay-curve analytics, then graduate to `paper` and confirm simulated results line up with what the decay curve implied was capturable, and only then consider `live` — with capital you can genuinely afford to lose.**
 
 ## Testing
 
 ```bash
-pytest         # 88 tests: core, all 15 strategies, execution/risk, hypothesis property tests -- no live network calls
+pytest         # 99 tests: core, all 15 strategies, execution/risk, dashboard API, hypothesis property tests -- no live network calls
 ruff check .   # clean
 python -m benchmarks.bench_detection
 ```
