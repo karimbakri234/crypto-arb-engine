@@ -37,7 +37,7 @@ class RestManager:
             return_exceptions=True,
         )
         connected: list[str] = []
-        for venue_id, result in zip(self.venue_ids, results):
+        for venue_id, result in zip(self.venue_ids, results, strict=True):
             if isinstance(result, Exception):
                 logger.warning("Failed to connect to %s: %s", venue_id, result)
                 continue

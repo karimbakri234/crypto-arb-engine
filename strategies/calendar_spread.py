@@ -48,12 +48,12 @@ class CalendarSpreadStrategy(Strategy):
             if len(quotes) < 2:
                 continue
             quotes.sort(key=lambda q: q.expiry_ts)
-            pairs = list(zip(quotes, quotes[1:]))
+            pairs = list(zip(quotes, quotes[1:], strict=False))
             marginal_rates = [marginal_forward_rate_pct(near, far) for near, far in pairs]
             curve_mean = sum(marginal_rates) / len(marginal_rates)
 
             fee = taker_fee_for(venue_id, TAKER_FEE_FALLBACK)
-            for (near, far), rate in zip(pairs, marginal_rates):
+            for (near, far), rate in zip(pairs, marginal_rates, strict=True):
                 divergence = rate - curve_mean
                 if abs(divergence) < self.min_profit_pct:
                     continue

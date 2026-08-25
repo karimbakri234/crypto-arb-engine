@@ -14,13 +14,14 @@ heavier dependency than the rest of this engine needs.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+import orjson
 
 from config.settings import LATENCY_BUDGETS
 
@@ -118,7 +119,7 @@ class MetricsRegistry:
             logger.info("metrics snapshot: %s", self.snapshot())
             try:
                 await asyncio.wait_for(stop_event.wait(), timeout=interval_sec)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 continue
 
     def start_http_server(self, port: int) -> None:
@@ -131,7 +132,9 @@ class MetricsRegistry:
                     self.send_response(404)
                     self.end_headers()
                     return
-                body = json.dumps(registry.snapshot()).encode("utf-8")
+                # orjson: the fastest common Python JSON encoder, matters when this
+                # snapshot is polled frequently or grows to many strategies/venues.
+                body = orjson.dumps(registry.snapshot())
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(body)))
@@ -162,7 +165,7 @@ class _TimedStage:
         self.stage = stage
         self._start_ns = 0
 
-    def __enter__(self) -> "_TimedStage":
+    def __enter__(self) -> _TimedStage:
         self._start_ns = time.perf_counter_ns()
         return self
 

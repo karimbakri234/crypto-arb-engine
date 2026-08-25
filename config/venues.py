@@ -10,10 +10,10 @@ nothing static is recomputed in the hot path.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 
 
-class Chain(str, Enum):
+class Chain(StrEnum):
     ETHEREUM = "ethereum"
     BSC = "bsc"
     SOLANA = "solana"

@@ -69,7 +69,7 @@ class LatencyArbStrategy(Strategy):
         buy_idx, sell_idx = np.where((net_pct >= self.min_profit_pct) & (gap >= self.min_lag_sec))
 
         opportunities: list[Opportunity] = []
-        for i, j in zip(buy_idx.tolist(), sell_idx.tolist()):
+        for i, j in zip(buy_idx.tolist(), sell_idx.tolist(), strict=True):
             buy_venue, sell_venue = matrix.venue_ids[i], matrix.venue_ids[j]
             size = min(float(matrix.ask_sizes[i]), float(matrix.bid_sizes[j]))
             size_usd = min(size * float(matrix.ask_prices[i]), self.max_trade_usd)

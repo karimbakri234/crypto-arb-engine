@@ -26,7 +26,7 @@ import asyncio
 import logging
 import os
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import pyarrow as pa
 import pyarrow.parquet as pq

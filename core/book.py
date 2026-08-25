@@ -63,7 +63,7 @@ class BookState:
         remaining = size
         cost = 0.0
         filled = 0.0
-        for price, level_size in zip(prices, sizes):
+        for price, level_size in zip(prices, sizes, strict=True):
             take = min(remaining, level_size)
             cost += take * price
             filled += take
@@ -118,8 +118,8 @@ class OrderBook:
         arrays and atomically swaps them in.
         """
         prior = self._state
-        bid_map = dict(zip(prior.bid_prices.tolist(), prior.bid_sizes.tolist()))
-        ask_map = dict(zip(prior.ask_prices.tolist(), prior.ask_sizes.tolist()))
+        bid_map = dict(zip(prior.bid_prices.tolist(), prior.bid_sizes.tolist(), strict=True))
+        ask_map = dict(zip(prior.ask_prices.tolist(), prior.ask_sizes.tolist(), strict=True))
 
         for price, size in bid_updates:
             if size <= 0:

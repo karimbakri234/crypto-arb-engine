@@ -9,17 +9,17 @@ the codebase in plain-dataclass style.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 
 import msgspec
 
 
-class Side(str, Enum):
+class Side(StrEnum):
     BUY = "buy"
     SELL = "sell"
 
 
-class Mode(str, Enum):
+class Mode(StrEnum):
     MONITOR = "monitor"
     PAPER = "paper"
     LIVE = "live"

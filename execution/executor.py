@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from core.book import BookStore
 from core.rest_manager import RestManager
@@ -125,7 +125,7 @@ class Executor:
         )
 
         leg_results: list[LegResult] = []
-        for leg, result in zip(opportunity.legs, results):
+        for leg, result in zip(opportunity.legs, results, strict=True):
             if isinstance(result, Exception):
                 leg_results.append(LegResult(leg=leg, success=False, error=str(result)))
             else:

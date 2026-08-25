@@ -56,7 +56,7 @@ class PerpPerpStrategy(Strategy):
         spot_symbol = perp_symbol.removesuffix("-PERP")
 
         opportunities: list[Opportunity] = []
-        for i, j in zip(long_idx.tolist(), short_idx.tolist()):
+        for i, j in zip(long_idx.tolist(), short_idx.tolist(), strict=True):
             long_venue, short_venue = matrix.venue_ids[i], matrix.venue_ids[j]
             size = min(float(matrix.ask_sizes[i]), float(matrix.bid_sizes[j]))
             size_usd = min(size * float(matrix.ask_prices[i]), self.max_trade_usd)

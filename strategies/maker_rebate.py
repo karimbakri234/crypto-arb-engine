@@ -65,7 +65,7 @@ class MakerRebateStrategy(Strategy):
         buy_idx, sell_idx = np.where((best_pct >= self.min_profit_pct) & (taker_taker_pct < self.min_profit_pct))
 
         opportunities: list[Opportunity] = []
-        for i, j in zip(buy_idx.tolist(), sell_idx.tolist()):
+        for i, j in zip(buy_idx.tolist(), sell_idx.tolist(), strict=True):
             buy_venue, sell_venue = matrix.venue_ids[i], matrix.venue_ids[j]
             paths = {
                 "maker_taker": float(maker_taker_pct[i, j]),
@@ -75,7 +75,7 @@ class MakerRebateStrategy(Strategy):
             best_path_name = max(paths, key=paths.get)
             best_path_pct = paths[best_path_name]
 
-            buy_fee = maker[i] if "maker_taker" == best_path_name or best_path_name == "maker_maker" else taker[i]
+            buy_fee = maker[i] if best_path_name == "maker_taker" or best_path_name == "maker_maker" else taker[i]
             sell_fee = maker[j] if best_path_name in ("taker_maker", "maker_maker") else taker[j]
 
             size = min(float(matrix.ask_sizes[i]), float(matrix.bid_sizes[j]))

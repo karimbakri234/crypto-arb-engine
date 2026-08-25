@@ -12,8 +12,8 @@ from dataclasses import dataclass, field
 from config.settings import (
     DAILY_LOSS_LIMIT_USD,
     MAX_CONSECUTIVE_FAILURES,
-    MAX_TRADES_PER_DAY,
     MAX_TRADE_USD,
+    MAX_TRADES_PER_DAY,
 )
 
 

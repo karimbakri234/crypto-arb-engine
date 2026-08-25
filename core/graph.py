@@ -26,7 +26,7 @@ brute-forcing every combination of markets by hand.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 @dataclass(frozen=True, slots=True)
