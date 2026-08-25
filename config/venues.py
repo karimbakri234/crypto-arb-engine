@@ -83,7 +83,8 @@ CEX_VENUES: dict[str, CexVenue] = {
         CexVenue("bitmart", "BitMart", 0.0025, 0.0025, {"BTC": 0.0005, "ETH": 0.0020, "USDT": 1.0}, 5, 600, True, False, False),
         CexVenue("lbank", "LBank", 0.0010, 0.0010, {"BTC": 0.0005, "ETH": 0.0020, "USDT": 1.0}, 5, 300, True, False, False),
         CexVenue("phemex", "Phemex", 0.0010, 0.0010, {"BTC": 0.0002, "ETH": 0.0015, "USDT": 1.0}, 5, 600, True, True, True),
-        CexVenue("woo", "WOO X", 0.0005, 0.0002, {"BTC": 0.0002, "ETH": 0.0010, "USDT": 1.0}, 5, 600, True, True, True),
+        # WOO X's maker fee is a representative negative rebate (VIP maker-rebate tier).
+        CexVenue("woo", "WOO X", 0.0005, -0.0001, {"BTC": 0.0002, "ETH": 0.0010, "USDT": 1.0}, 5, 600, True, True, True),
         CexVenue("deribit", "Deribit", 0.0003, 0.0000, {"BTC": 0.0001, "ETH": 0.0010, "USDT": 1.0}, 10, 1200, True, True, True),
     ]
 }
@@ -128,3 +129,14 @@ def taker_fee_for(venue_id: str, fallback: float) -> float:
     if dex is not None and dex.swap_fee_tiers:
         return min(dex.swap_fee_tiers)
     return fallback
+
+
+def maker_fee_for(venue_id: str, fallback: float) -> float:
+    """Look up a venue's maker fee, or `fallback` if the venue is unknown.
+
+    Can be negative (a rebate) on venues that pay makers to add liquidity.
+    """
+    cex = CEX_VENUES.get(venue_id)
+    if cex is not None:
+        return cex.maker_fee
+    return taker_fee_for(venue_id, fallback)
