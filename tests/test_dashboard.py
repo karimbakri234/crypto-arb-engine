@@ -150,3 +150,34 @@ def test_websocket_receives_initial_state(tmp_path):
         msg = ws.receive_json()
         assert msg["type"] == "state"
         assert msg["data"]["mode"] == "monitor"
+
+
+def test_get_opportunities_returns_recorded_history(tmp_path):
+    """Regression: all_opportunity_records is a bounded deque (see
+    analytics/recorder.py), which doesn't support slicing directly --
+    this exercises the real route handler, not just the recorder in
+    isolation, to make sure that conversion actually happens."""
+    control = ControlState()
+    risk_manager = RiskManager(RiskLimits())
+    recorder = OpportunityRecorder(output_dir=str(tmp_path))
+    metrics = MetricsRegistry()
+    rest_manager = RestManager([])
+    book_store = BookStore()
+    broadcaster = Broadcaster()
+
+    opportunity = Opportunity(
+        strategy="cross_exchange", symbol="BTC/USDT",
+        legs=(), gross_profit_pct=1.0, net_profit_pct=0.8, max_size_usd=100.0,
+    )
+    for _ in range(3):
+        recorder.record(opportunity)
+
+    app = create_app(control, risk_manager, [], recorder, metrics, rest_manager, book_store, broadcaster)
+    client = TestClient(app)
+
+    resp = client.get("/api/opportunities?limit=2")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert len(body) == 2
+    assert body[0]["id"] == 2  # newest first

@@ -311,7 +311,10 @@ async def run() -> None:
                     {
                         "type": "tick",
                         "data": {
-                            "opportunities": recorder.all_opportunity_records[-len(new_opportunities):] if new_opportunities else [],
+                            # all_opportunity_records is a deque (bounded rolling
+                            # history, see analytics/recorder.py) -- doesn't
+                            # support slicing directly.
+                            "opportunities": list(recorder.all_opportunity_records)[-len(new_opportunities):] if new_opportunities else [],
                             "stats": build_snapshot(control, risk_manager, strategies, rest_manager, book_store, metrics),
                         },
                     }

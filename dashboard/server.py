@@ -118,7 +118,9 @@ def create_app(
 
     @app.get("/api/opportunities")
     def get_opportunities(limit: int = 50) -> list[dict]:
-        return list(reversed(recorder.all_opportunity_records[-limit:]))
+        # all_opportunity_records is a deque (bounded rolling history, see
+        # analytics/recorder.py), which doesn't support slicing directly.
+        return list(reversed(list(recorder.all_opportunity_records)[-limit:]))
 
     @app.get("/api/report")
     def get_report(target_usd_per_hour: float | None = None) -> dict:

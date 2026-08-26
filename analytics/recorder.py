@@ -26,6 +26,7 @@ import asyncio
 import logging
 import os
 import time
+from collections import deque
 from dataclasses import dataclass
 
 import pyarrow as pa
@@ -35,6 +36,19 @@ from config.settings import DECAY_CHECK_DELAYS_SEC, RECORDER_OUTPUT_DIR
 from strategies.base import Opportunity
 
 logger = logging.getLogger(__name__)
+
+# `all_opportunity_records`/`all_decay_records` exist so the dashboard and
+# generate_summary_report can look back over recent history without
+# re-reading parquet files -- everything is still written to parquet on
+# every flush() regardless of these caps, so nothing is lost, just not
+# all held in RAM forever. Without a cap, a long-running process
+# genuinely runs out of memory: this is a real incident, not a
+# hypothetical -- a multi-hour run OOM-killed the whole bot because these
+# lists grew unbounded for the life of the process. Decay records grow
+# ~len(DECAY_CHECK_DELAYS_SEC)x faster than opportunity records (one per
+# configured delay per opportunity), so it gets a proportionally larger cap.
+_MAX_IN_MEMORY_OPPORTUNITY_RECORDS = 10_000
+_MAX_IN_MEMORY_DECAY_RECORDS = 30_000
 
 
 @dataclass(slots=True)
@@ -53,16 +67,31 @@ class DecayResult:
 class OpportunityRecorder:
     """Buffers detected opportunities and their decay checks, and flushes to parquet."""
 
-    def __init__(self, output_dir: str = RECORDER_OUTPUT_DIR, decay_delays: tuple[float, ...] = DECAY_CHECK_DELAYS_SEC) -> None:
+    def __init__(
+        self,
+        output_dir: str = RECORDER_OUTPUT_DIR,
+        decay_delays: tuple[float, ...] = DECAY_CHECK_DELAYS_SEC,
+        max_in_memory_opportunities: int = _MAX_IN_MEMORY_OPPORTUNITY_RECORDS,
+        max_in_memory_decay_records: int = _MAX_IN_MEMORY_DECAY_RECORDS,
+    ) -> None:
         self.output_dir = output_dir
         self.decay_delays = decay_delays
+        self.max_in_memory_opportunities = max_in_memory_opportunities
+        self.max_in_memory_decay_records = max_in_memory_decay_records
         os.makedirs(output_dir, exist_ok=True)
 
         self._next_id = 0
         self._opportunity_buffer: list[dict] = []
         self._decay_buffer: list[dict] = []
-        self.all_opportunity_records: list[dict] = []  # kept in-memory for generate_summary_report
-        self.all_decay_records: list[dict] = []
+        # Bounded rolling history for generate_summary_report/the dashboard
+        # -- see _MAX_IN_MEMORY_* above for why these aren't plain lists.
+        self.all_opportunity_records: deque[dict] = deque()
+        self.all_decay_records: deque[dict] = deque()
+        # id -> record, so attach_trade_result can look up by the real
+        # opportunity id in O(1) even after older records have aged out of
+        # all_opportunity_records (a plain list relied on position == id,
+        # which breaks the moment anything is ever evicted from the front).
+        self._by_id: dict[int, dict] = {}
 
     def record(self, opportunity: Opportunity) -> int:
         """Buffer one opportunity's full context. Returns an id for decay tracking."""
@@ -91,18 +120,25 @@ class OpportunityRecorder:
         }
         self._opportunity_buffer.append(record)
         self.all_opportunity_records.append(record)
+        self._by_id[opportunity_id] = record
+        if len(self.all_opportunity_records) > self.max_in_memory_opportunities:
+            evicted = self.all_opportunity_records.popleft()
+            self._by_id.pop(evicted["id"], None)
         return opportunity_id
 
     def attach_trade_result(self, opportunity_id: int, pnl_usd: float, mode: str) -> None:
         """Record a paper/live trade's realized PnL against its opportunity.
 
-        `opportunity_id` indexes directly into `all_opportunity_records`
-        since ids are assigned sequentially in `record()`'s append order.
+        Looks up by the real opportunity id via `_by_id` (not position --
+        `all_opportunity_records` is a bounded rolling window, so a given
+        id's position shifts as older records age out). A no-op if the
+        opportunity has already aged out of memory by the time its trade
+        result comes back; it was still written to parquet by `flush()`.
         Lets the dashboard show a $ P&L next to the specific opportunity
         that produced it, not just an aggregate.
         """
-        if 0 <= opportunity_id < len(self.all_opportunity_records):
-            record = self.all_opportunity_records[opportunity_id]
+        record = self._by_id.get(opportunity_id)
+        if record is not None:
             record["pnl_usd"] = pnl_usd
             record["trade_mode"] = mode
 
@@ -145,6 +181,8 @@ class OpportunityRecorder:
         }
         self._decay_buffer.append(record)
         self.all_decay_records.append(record)
+        if len(self.all_decay_records) > self.max_in_memory_decay_records:
+            self.all_decay_records.popleft()
 
     def flush(self) -> None:
         """Write buffered opportunity and decay records to parquet and clear buffers."""
