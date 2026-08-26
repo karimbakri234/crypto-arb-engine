@@ -26,7 +26,7 @@ cp .env.example .env   # then fill in real API keys / RPC URLs
 - RPC endpoints per chain: `ETH_RPC_URL`, `ARBITRUM_RPC_URL`, `BASE_RPC_URL`, `POLYGON_RPC_URL`, `BSC_RPC_URL`, `SOLANA_RPC_URL`.
 - Aggregator API keys (optional): `ONEINCH_API_KEY`, `ZEROX_API_KEY`, `JUPITER_API_KEY`, `ODOS_API_KEY`.
 - Risk overrides: `MAX_TRADE_USD`, `DAILY_LOSS_LIMIT_USD`, `MAX_TRADES_PER_DAY`, `MAX_CONSECUTIVE_FAILURES`.
-- Dashboard: `DASHBOARD_ENABLED` (default `true`), `DASHBOARD_HOST` (default `127.0.0.1`), `DASHBOARD_PORT` (default `8420`) — see [Local dashboard](#local-dashboard).
+- Dashboard: `DASHBOARD_ENABLED` (default `true`), `DASHBOARD_HOST` (default `127.0.0.1`), `DASHBOARD_PORT` (default `8420`), `DASHBOARD_USERNAME`/`DASHBOARD_PASSWORD` (required together if `DASHBOARD_HOST` is not local) — see [Local dashboard](#local-dashboard).
 
 All credentials load via `python-dotenv` from a local `.env`. Nothing is hardcoded.
 
@@ -47,6 +47,8 @@ A `/metrics` HTTP endpoint (`METRICS_HTTP_PORT`, default 9100) serves a JSON sna
 **This is a real control plane for a real process, not a demo.** It reads and mutates the exact same `RiskManager`, `ControlState`, and strategy list the detection loop uses — there is no separate database or simulation layer. Switching to `live` from this page has the identical real-money consequences as setting `ARB_MODE=live` in `.env`: the next opportunity the loop finds fires real market orders against whatever balances are pre-funded on the connected exchanges. The dashboard's own `POST /api/mode` route refuses to arm `live` without an explicit `confirm: true`, and the page shows the same pre-funded-balance warning before letting you check that box — but that's a safety rail, not a substitute for reading [Before running with real money](#before-running-with-real-money) first.
 
 It binds to localhost only (`DASHBOARD_HOST=127.0.0.1`) and is meant to be viewed from the same machine the bot runs on. Set `DASHBOARD_ENABLED=false` to disable it entirely, or change `DASHBOARD_HOST`/`DASHBOARD_PORT` if you understand the risk of exposing a mode-switching, order-arming API beyond your own machine — the default is deliberately conservative.
+
+**If you do change `DASHBOARD_HOST` (e.g. to `0.0.0.0` on a cloud VPS so you can reach it from your own browser), you must also set `DASHBOARD_USERNAME` and `DASHBOARD_PASSWORD` in `.env`.** With both set, every route — the API, the websocket, and the static frontend — requires HTTP Basic Auth (`dashboard/auth.py`); your browser will show a normal login prompt. Leaving `DASHBOARD_HOST` non-local without these set logs a `CRITICAL` warning on startup, because the dashboard is otherwise reachable, unauthenticated, by anyone who finds the IP and port. Note that this is plain HTTP, not HTTPS: Basic Auth stops casual/opportunistic access (port scanners, a leaked IP), but the credentials themselves aren't encrypted in transit — don't reuse a password you care about elsewhere, and if you want protection against someone actively monitoring the network path to your server, put this behind an SSH tunnel or a TLS-terminating reverse proxy instead of trusting Basic Auth alone.
 
 ## Project structure
 
@@ -176,7 +178,7 @@ Read this section in full before ever setting `ARB_MODE=live`.
 8. **Smart contract risk is real for every DEX leg.** This bot detects and constructs on-chain transactions; it does not audit the AMM/aggregator/bridge contracts it interacts with. The flash-loan-funded same-chain path additionally requires a deployed repay-in-one-transaction contract this Python bot does not provide or audit.
 9. **`latency_arb.py` is close to un-winnable for a Python bot.** It's included because it's a real category, and because feeding its findings into the decay-curve analytics is informative — not because you should expect to capture it. Firms colocated at exchange data centers close this kind of lag in low-single-digit milliseconds.
 10. **`statistical.py` is not arbitrage.** It carries real directional risk and can lose money even when everything is implemented correctly.
-11. **The dashboard is a real control surface, not a viewer.** Anyone who can reach `http://<DASHBOARD_HOST>:<DASHBOARD_PORT>` can switch the running process to `live` and arm real orders. The default (`127.0.0.1`) keeps it reachable only from the machine the bot runs on; treat changing that host the same way you'd treat exposing an exchange API key.
+11. **The dashboard is a real control surface, not a viewer.** Anyone who can reach `http://<DASHBOARD_HOST>:<DASHBOARD_PORT>` can switch the running process to `live` and arm real orders. The default (`127.0.0.1`) keeps it reachable only from the machine the bot runs on; treat changing that host the same way you'd treat exposing an exchange API key. If you do expose it, set `DASHBOARD_USERNAME`/`DASHBOARD_PASSWORD` (see [Local dashboard](#local-dashboard)) — an exposed dashboard with no login is equivalent to publishing your exchange API keys.
 12. **Exchange ToS, tax treatment of arbitrage trading, and local regulation on automated trading all vary by exchange and jurisdiction.** That's on you to check before running anything live.
 
 **Workflow: run `monitor` for days and read the decay-curve analytics, then graduate to `paper` and confirm simulated results line up with what the decay curve implied was capturable, and only then consider `live` — with capital you can genuinely afford to lose.**
@@ -184,7 +186,7 @@ Read this section in full before ever setting `ARB_MODE=live`.
 ## Testing
 
 ```bash
-pytest         # 106 tests: core, all 15 strategies, execution/risk (incl. the pre-execution profitability re-check), dashboard API, hypothesis property tests -- no live network calls
+pytest         # 113 tests: core, all 15 strategies, execution/risk (incl. the pre-execution profitability re-check), dashboard API + Basic Auth, hypothesis property tests -- no live network calls
 ruff check .   # clean
 python -m benchmarks.bench_detection
 ```

@@ -116,6 +116,12 @@ DASHBOARD_ENABLED: bool = os.getenv("DASHBOARD_ENABLED", "true").strip().lower()
 DASHBOARD_HOST: str = os.getenv("DASHBOARD_HOST", "127.0.0.1")
 DASHBOARD_PORT: int = int(os.getenv("DASHBOARD_PORT", "8420"))
 
+# Required (both) to protect the dashboard with HTTP Basic Auth -- see
+# dashboard/auth.py. Left unset, the dashboard runs with no login at all,
+# which is only acceptable while DASHBOARD_HOST stays 127.0.0.1.
+DASHBOARD_USERNAME: str = os.getenv("DASHBOARD_USERNAME", "")
+DASHBOARD_PASSWORD: str = os.getenv("DASHBOARD_PASSWORD", "")
+
 
 @dataclass(slots=True)
 class Settings:

@@ -27,7 +27,9 @@ from analytics.recorder import OpportunityRecorder
 from config.settings import (
     DASHBOARD_ENABLED,
     DASHBOARD_HOST,
+    DASHBOARD_PASSWORD,
     DASHBOARD_PORT,
+    DASHBOARD_USERNAME,
     MAX_TRADE_USD,
     METRICS_HTTP_PORT,
     METRICS_LOG_DUMP_INTERVAL_SEC,
@@ -208,11 +210,25 @@ async def run() -> None:
         executor = Executor(rest_manager, risk_manager, reconciler, book_store, mode=control.mode)
 
         if DASHBOARD_ENABLED:
-            app = create_app(control, risk_manager, strategies, recorder, metrics, rest_manager, book_store, broadcaster)
+            auth_configured = bool(DASHBOARD_USERNAME and DASHBOARD_PASSWORD)
+            if DASHBOARD_HOST not in ("127.0.0.1", "localhost") and not auth_configured:
+                logger.critical(
+                    "Dashboard is bound to %s with NO LOGIN configured -- anyone who finds this "
+                    "IP/port can switch this bot to live and arm real orders. Set DASHBOARD_USERNAME "
+                    "and DASHBOARD_PASSWORD in .env and restart before leaving this exposed.",
+                    DASHBOARD_HOST,
+                )
+            app = create_app(
+                control, risk_manager, strategies, recorder, metrics, rest_manager, book_store, broadcaster,
+                auth_username=DASHBOARD_USERNAME or None, auth_password=DASHBOARD_PASSWORD or None,
+            )
             uvicorn_config = uvicorn.Config(app, host=DASHBOARD_HOST, port=DASHBOARD_PORT, log_level="warning")
             uvicorn_server = uvicorn.Server(uvicorn_config)
             dashboard_task = asyncio.create_task(uvicorn_server.serve())
-            logger.info("Dashboard: http://%s:%d (mode/risk/strategy controls; live means real orders)", DASHBOARD_HOST, DASHBOARD_PORT)
+            logger.info(
+                "Dashboard: http://%s:%d (mode/risk/strategy controls; live means real orders; auth=%s)",
+                DASHBOARD_HOST, DASHBOARD_PORT, "on" if auth_configured else "OFF",
+            )
 
         logger.info("Running in %r mode with %d strategies", control.mode, len(strategies))
 

@@ -26,6 +26,7 @@ from analytics.recorder import OpportunityRecorder
 from core.book import BookStore
 from core.control import VALID_MODES, ControlState
 from core.rest_manager import RestManager
+from dashboard.auth import BasicAuthMiddleware
 from dashboard.state import Broadcaster, build_snapshot
 from risk.manager import RiskManager
 from strategies.base import Strategy
@@ -71,9 +72,20 @@ def create_app(
     rest_manager: RestManager,
     book_store: BookStore,
     broadcaster: Broadcaster,
+    auth_username: str | None = None,
+    auth_password: str | None = None,
 ) -> FastAPI:
-    """Build the dashboard FastAPI app bound to one running engine's live state."""
+    """Build the dashboard FastAPI app bound to one running engine's live state.
+
+    When `auth_username`/`auth_password` are both set, every route --
+    including the websocket and static frontend -- requires HTTP Basic
+    Auth (see `dashboard/auth.py`). Leave them unset only when
+    `DASHBOARD_HOST` is `127.0.0.1` (the default); anything reachable
+    beyond localhost should always set these.
+    """
     app = FastAPI(title="crypto-arb-engine dashboard")
+    if auth_username and auth_password:
+        app.add_middleware(BasicAuthMiddleware, username=auth_username, password=auth_password)
     strategy_by_name = {s.name: s for s in strategies}
     for s in strategies:
         control.strategy_enabled.setdefault(s.name, True)
