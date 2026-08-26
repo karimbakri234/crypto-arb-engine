@@ -89,9 +89,9 @@ class Executor:
     def _handle_monitor(self, opportunity: Opportunity) -> None:
         logger.info("[MONITOR] %s", opportunity)
 
-    def _estimate_pnl_usd(self, opportunity: Opportunity, size_usd: float) -> float:
-        """Simple fee-adjusted PnL estimate used by monitor/paper accounting."""
-        return size_usd * (opportunity.net_profit_pct / 100.0)
+    def _estimate_pnl_usd(self, size_usd: float, net_profit_pct: float) -> float:
+        """Fee-adjusted PnL estimate from an as-of-now net profit percentage."""
+        return size_usd * (net_profit_pct / 100.0)
 
     def _handle_paper(self, opportunity: Opportunity) -> None:
         size_usd = self.risk_manager.size_with_depth_check(opportunity, self.book_store)
@@ -99,7 +99,17 @@ class Executor:
             logger.info("[PAPER] Skipping zero-size (post-slippage-check) opportunity: %s", opportunity)
             return
 
-        pnl = self._estimate_pnl_usd(opportunity, size_usd)
+        still_profitable, net_profit_pct = self.risk_manager.reverify_profitability(
+            opportunity, self.book_store, size_usd
+        )
+        if not still_profitable:
+            logger.info(
+                "[PAPER] Skipping: no longer profitable as-of-now (recomputed net=%.4f%%): %s",
+                net_profit_pct, opportunity,
+            )
+            return
+
+        pnl = self._estimate_pnl_usd(size_usd, net_profit_pct)
         self.risk_manager.record_result(opportunity, pnl, success=True)
         self.trade_log.append(TradeLogEntry(opportunity=opportunity, mode="paper", pnl_usd=pnl))
         logger.info("[PAPER] Simulated fill: size=$%.2f net_pnl=$%.4f (%s)", size_usd, pnl, opportunity)
@@ -115,6 +125,16 @@ class Executor:
         size_usd = self.risk_manager.size_with_depth_check(opportunity, self.book_store)
         if size_usd <= 0:
             logger.info("[LIVE] Skipping zero-size (post-slippage-check) opportunity: %s", opportunity)
+            return
+
+        still_profitable, net_profit_pct = self.risk_manager.reverify_profitability(
+            opportunity, self.book_store, size_usd
+        )
+        if not still_profitable:
+            logger.info(
+                "[LIVE] Skipping: no longer profitable as-of-now (recomputed net=%.4f%%); real money stays put: %s",
+                net_profit_pct, opportunity,
+            )
             return
 
         logger.warning("[LIVE] Firing %d leg(s) for %s (size=$%.2f)", len(opportunity.legs), opportunity, size_usd)
@@ -134,7 +154,7 @@ class Executor:
         all_ok = all(r.success for r in leg_results)
         self.reconciler.check(opportunity, leg_results)
 
-        pnl = self._estimate_pnl_usd(opportunity, size_usd) if all_ok else 0.0
+        pnl = self._estimate_pnl_usd(size_usd, net_profit_pct) if all_ok else 0.0
         self.risk_manager.record_result(opportunity, pnl, success=all_ok)
         note = "" if all_ok else "PARTIAL_FILL_RECONCILIATION_REQUIRED"
         self.trade_log.append(TradeLogEntry(opportunity=opportunity, mode="live", pnl_usd=pnl if all_ok else None, note=note))

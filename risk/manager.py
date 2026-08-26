@@ -144,6 +144,66 @@ class RiskManager:
 
         return min(proposed_usd, filled_size * vwap_price)
 
+    def reverify_profitability(
+        self,
+        opportunity: Opportunity,
+        book_store: BookStore,
+        size_usd: float,
+    ) -> tuple[bool, float]:
+        """Recompute this opportunity's net profit against the order book
+        *right now*, immediately before committing capital.
+
+        `opportunity.net_profit_pct` is stamped at detection time. By the
+        time sizing/risk checks finish, real REST-polling latency (see
+        `config.settings.LATENCY_BUDGETS`) means the book has often moved
+        or another actor has already taken the edge -- the recorder's own
+        decay-curve analytics show most detected spreads do not survive
+        even 100ms. This walks every leg's *current* book depth and real
+        fees to get an as-of-now net profit; the caller should skip the
+        trade unless the result is actually profitable, rather than
+        trusting the stale detection-time figure.
+
+        Returns `(still_profitable, recomputed_net_profit_pct)`.
+        """
+        if not opportunity.legs or size_usd <= 0:
+            return False, 0.0
+
+        buy_leg = next((leg for leg in opportunity.legs if leg.side == "buy"), opportunity.legs[0])
+        if buy_leg.price <= 0 or buy_leg.size <= 0:
+            return False, 0.0
+
+        # Every leg's size scales together with the buy leg's (arbitrage
+        # legs move fixed ratios of one another around a cycle), so one
+        # scale factor derived from the sized buy leg applies to all legs.
+        scale = (size_usd / buy_leg.price) / buy_leg.size
+
+        total_cost = 0.0
+        total_proceeds = 0.0
+        for leg in opportunity.legs:
+            leg_size = leg.size * scale
+            book = book_store.get(leg.venue_id, leg.symbol)
+            if book is None:
+                price, filled = leg.price, leg_size
+            else:
+                price, filled = book.snapshot().vwap_fill_price(leg.side, leg_size)
+            price, filled = float(price), float(filled)
+
+            if filled <= 0 or price <= 0:
+                return False, 0.0
+
+            notional = price * filled
+            fee_amount = notional * leg.fee
+            if leg.side == "buy":
+                total_cost += notional + fee_amount
+            else:
+                total_proceeds += notional - fee_amount
+
+        if total_cost <= 0:
+            return False, 0.0
+
+        net_profit_pct = (total_proceeds - total_cost) / total_cost * 100.0
+        return bool(net_profit_pct > 0.0), net_profit_pct
+
     def record_result(self, opportunity: Opportunity, pnl_usd: float, success: bool) -> None:
         """Record a completed (or failed) trade's outcome."""
         self._roll_day_if_needed()

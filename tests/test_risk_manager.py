@@ -114,3 +114,41 @@ def test_size_with_depth_check_accepts_within_slippage_tolerance():
     size_usd = rm.size_with_depth_check(opp, store, max_slippage_pct=1.0)
 
     assert size_usd > 0.0
+
+
+def test_reverify_profitability_confirms_edge_still_there():
+    rm = RiskManager()
+    store = BookStore()
+    store.get_or_create("binance", "BTC/USDT").replace(bids=[(99.9, 5.0)], asks=[(100.0, 5.0)])
+    store.get_or_create("kraken", "BTC/USDT").replace(bids=[(102.0, 5.0)], asks=[(102.1, 5.0)])
+    opp = _opportunity(size_usd=100.0)
+
+    still_profitable, net_profit_pct = rm.reverify_profitability(opp, store, size_usd=100.0)
+
+    assert still_profitable is True
+    assert net_profit_pct > 0.0
+
+
+def test_reverify_profitability_rejects_edge_that_vanished():
+    rm = RiskManager()
+    store = BookStore()
+    # Same book on both venues now (post-detection, the spread closed).
+    store.get_or_create("binance", "BTC/USDT").replace(bids=[(99.9, 5.0)], asks=[(100.0, 5.0)])
+    store.get_or_create("kraken", "BTC/USDT").replace(bids=[(99.9, 5.0)], asks=[(100.0, 5.0)])
+    opp = _opportunity(size_usd=100.0)
+
+    still_profitable, net_profit_pct = rm.reverify_profitability(opp, store, size_usd=100.0)
+
+    assert still_profitable is False
+    assert net_profit_pct <= 0.0
+
+
+def test_reverify_profitability_missing_book_falls_back_to_detection_price():
+    rm = RiskManager()
+    store = BookStore()  # no books at all
+    opp = _opportunity(size_usd=100.0)  # detection-time legs: buy@100, sell@102, 0.1% fees each
+
+    still_profitable, net_profit_pct = rm.reverify_profitability(opp, store, size_usd=100.0)
+
+    assert still_profitable is True
+    assert net_profit_pct > 0.0
