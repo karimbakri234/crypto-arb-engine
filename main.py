@@ -272,6 +272,11 @@ async def run() -> None:
                 for opportunity in all_opportunities:
                     metrics.record_hit(opportunity.strategy, hit=True)
                     opportunity_id = recorder.record(opportunity)
+                    # Stashed on the opportunity itself (not a side dict) so it
+                    # travels naturally into the execution loop below, where a
+                    # trade's realized PnL gets attached back to this exact
+                    # detected opportunity for the dashboard to display.
+                    opportunity.detail["recorder_id"] = opportunity_id
                     recorder.schedule_decay_checks(
                         opportunity_id, opportunity, rescan_fn=lambda o=opportunity: _rescan_net_profit_pct(book_store, o)
                     )
@@ -284,9 +289,20 @@ async def run() -> None:
                         to_execute = router.select(all_opportunities)
 
                 for opportunity in to_execute:
+                    trades_before = len(executor.trade_log)
                     await executor.handle(opportunity)
-                    if executor.trade_log:
-                        metrics.record_pnl(opportunity.strategy, executor.trade_log[-1].pnl_usd or 0.0)
+                    # Compare trade_log length rather than truthiness -- the
+                    # list is non-empty forever after the first trade, so a
+                    # bare `if executor.trade_log:` would misattribute an
+                    # earlier trade's PnL to every later opportunity that the
+                    # risk manager, router, or profitability re-check skips.
+                    if len(executor.trade_log) > trades_before:
+                        last_trade = executor.trade_log[-1]
+                        pnl = last_trade.pnl_usd or 0.0
+                        metrics.record_pnl(opportunity.strategy, pnl)
+                        recorder_id = opportunity.detail.get("recorder_id")
+                        if recorder_id is not None:
+                            recorder.attach_trade_result(recorder_id, pnl, control.mode)
 
                 recorder.flush()
 

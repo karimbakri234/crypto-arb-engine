@@ -82,10 +82,29 @@ class OpportunityRecorder:
             "max_size_usd": opportunity.max_size_usd,
             "requires_prefunded_inventory": opportunity.requires_prefunded_inventory,
             "is_atomic": opportunity.is_atomic,
+            # Filled in later by `attach_trade_result` if this opportunity
+            # actually got traded (paper or live) -- stays None for an
+            # opportunity that was only ever detected (monitor mode, or
+            # skipped by risk/router/the profitability re-check).
+            "pnl_usd": None,
+            "trade_mode": None,
         }
         self._opportunity_buffer.append(record)
         self.all_opportunity_records.append(record)
         return opportunity_id
+
+    def attach_trade_result(self, opportunity_id: int, pnl_usd: float, mode: str) -> None:
+        """Record a paper/live trade's realized PnL against its opportunity.
+
+        `opportunity_id` indexes directly into `all_opportunity_records`
+        since ids are assigned sequentially in `record()`'s append order.
+        Lets the dashboard show a $ P&L next to the specific opportunity
+        that produced it, not just an aggregate.
+        """
+        if 0 <= opportunity_id < len(self.all_opportunity_records):
+            record = self.all_opportunity_records[opportunity_id]
+            record["pnl_usd"] = pnl_usd
+            record["trade_mode"] = mode
 
     def schedule_decay_checks(
         self,

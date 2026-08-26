@@ -45,6 +45,25 @@ class RestManager:
         logger.info("RestManager connected to %d/%d venues", len(connected), len(self.venue_ids))
         return connected
 
+    async def reconnect(self, venue_id: str) -> bool:
+        """Close and recreate one venue's ccxt client, picking up fresh
+        credentials from the environment (see `dashboard/credentials.py`).
+
+        Used when API keys are set or changed for a venue while the bot is
+        already running, so the dashboard's "connected venues" panel can
+        arm a venue for trading without needing a full process restart.
+        Returns whether the reconnect succeeded.
+        """
+        old_client = self.clients.pop(venue_id, None)
+        if old_client is not None:
+            await old_client.close()
+        try:
+            await self._connect_one(venue_id)
+            return True
+        except Exception as exc:
+            logger.warning("Reconnect failed for %s: %s", venue_id, exc)
+            return False
+
     async def _connect_one(self, venue_id: str) -> None:
         if not hasattr(ccxt, venue_id):
             raise ValueError(f"ccxt has no exchange named {venue_id!r}")

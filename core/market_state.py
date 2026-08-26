@@ -62,13 +62,26 @@ class MarketState:
     dex_pools: dict[str, PoolState] = field(default_factory=dict)
     gas_price_usd: dict[str, float] = field(default_factory=dict)
     staleness_sec: float = 3.0
+    _matrix_cache: dict[str, SymbolMatrix] = field(default_factory=dict, repr=False)
 
     def matrix_for_symbol(self, symbol: str) -> SymbolMatrix:
         """Build venue x price/size numpy arrays for `symbol` in one pass.
 
         This is what lets cross-exchange detection be a matrix operation
-        instead of a Python double loop over venue pairs.
+        instead of a Python double loop over venue pairs. Multiple
+        strategies (cross_exchange, latency_arb, maker_rebate, perp_perp)
+        call this for the same symbol against the same `MarketState`
+        instance within one detection tick -- caching per instance means
+        the underlying book scan/array-build happens once per symbol per
+        tick instead of once per (symbol, strategy). Safe because nothing
+        mutates `book_store` mid-tick: the detection pass that hands out
+        one `MarketState` never awaits, so the concurrent feed loop can't
+        interleave a write in between calls.
         """
+        cached = self._matrix_cache.get(symbol)
+        if cached is not None:
+            return cached
+
         books = self.book_store.all_for_symbol(symbol)
         venue_ids: list[str] = []
         bids: list[float] = []
@@ -91,7 +104,7 @@ class MarketState:
             ask_sizes.append(state.best_ask_size)
             timestamps.append(state.timestamp)
 
-        return SymbolMatrix(
+        matrix = SymbolMatrix(
             venue_ids=venue_ids,
             bid_prices=np.array(bids, dtype=np.float64),
             ask_prices=np.array(asks, dtype=np.float64),
@@ -99,3 +112,5 @@ class MarketState:
             ask_sizes=np.array(ask_sizes, dtype=np.float64),
             timestamps=np.array(timestamps, dtype=np.float64),
         )
+        self._matrix_cache[symbol] = matrix
+        return matrix

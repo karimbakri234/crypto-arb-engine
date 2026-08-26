@@ -23,10 +23,13 @@ from pydantic import BaseModel
 
 from analytics.metrics import MetricsRegistry
 from analytics.recorder import OpportunityRecorder
+from config.settings import get_credentials
+from config.venues import CEX_VENUES
 from core.book import BookStore
 from core.control import VALID_MODES, ControlState
 from core.rest_manager import RestManager
 from dashboard.auth import BasicAuthMiddleware
+from dashboard.credentials import write_credentials
 from dashboard.state import Broadcaster, build_snapshot
 from risk.manager import RiskManager
 from strategies.base import Strategy
@@ -53,6 +56,12 @@ class RiskLimitsRequest(BaseModel):
 
 class StrategyToggleRequest(BaseModel):
     enabled: bool
+
+
+class VenueCredentialsRequest(BaseModel):
+    api_key: str
+    secret: str
+    passphrase: str | None = None
 
 
 LIVE_CONFIRMATION_MESSAGE = (
@@ -173,6 +182,47 @@ def create_app(
         result = snapshot()
         await broadcaster.publish({"type": "state", "data": result})
         return result
+
+    @app.get("/api/venues")
+    def get_venues() -> list[dict]:
+        """Every configured CEX venue's connection + credential status.
+
+        `has_credentials` never returns the key/secret itself -- only
+        whether one is set -- so this is safe to expose without leaking
+        anything back out over the wire.
+        """
+        venues = []
+        for venue_id, venue in CEX_VENUES.items():
+            creds = get_credentials(venue_id)
+            venues.append(
+                {
+                    "id": venue_id,
+                    "name": venue.name,
+                    "connected": venue_id in rest_manager.clients,
+                    "has_credentials": bool(creds.get("apiKey")),
+                    "is_derivatives": venue.is_derivatives,
+                }
+            )
+        return venues
+
+    @app.post("/api/venues/{venue_id}/credentials")
+    async def set_venue_credentials(venue_id: str, req: VenueCredentialsRequest) -> dict:
+        """Save API credentials for `venue_id` and reconnect it immediately.
+
+        Persists to `.env` (see dashboard/credentials.py) so a restart
+        doesn't lose them, then tears down and recreates that venue's ccxt
+        client so it can be used for `live` order placement in this same
+        run without needing to restart the process. See that module's
+        docstring for the plain-HTTP transport caveat.
+        """
+        if venue_id not in CEX_VENUES:
+            raise HTTPException(404, f"unknown venue {venue_id!r}")
+        write_credentials(venue_id, req.api_key, req.secret, req.passphrase)
+        reconnected = await rest_manager.reconnect(venue_id)
+        logger.warning("Dashboard: credentials updated for venue=%s reconnected=%s", venue_id, reconnected)
+        result = snapshot()
+        await broadcaster.publish({"type": "state", "data": result})
+        return {"id": venue_id, "connected": reconnected, "has_credentials": True}
 
     @app.websocket("/ws")
     async def ws_endpoint(websocket: WebSocket) -> None:

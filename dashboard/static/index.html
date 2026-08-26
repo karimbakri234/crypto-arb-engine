@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>crypto-arb-engine — dashboard</title>
+<title>KbotV2 — dashboard</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Unbounded:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -33,8 +33,11 @@ button{ font-family:inherit; }
 
 .app{ min-height:100vh; display:flex; flex-direction:column; }
 .topbar{ display:flex; align-items:center; gap:16px; padding:12px 20px; border-bottom:1px solid var(--border); background:linear-gradient(180deg,var(--surface),var(--bg)); flex-wrap:wrap; }
-.brand{ display:flex; align-items:baseline; gap:10px; margin-right:auto; }
+.brand{ display:flex; align-items:center; gap:10px; margin-right:auto; }
+.brand-mark{ display:flex; align-items:center; justify-content:center; width:30px; height:30px; border-radius:8px; background:linear-gradient(135deg,var(--accent),#B67A1E); color:#241705; font-family:var(--font-display); font-weight:700; font-size:13px; flex:none; }
+.brand-text{ display:flex; flex-direction:column; line-height:1.15; }
 .brand h1{ font-size:16px; letter-spacing:0.02em; }
+.brand .tagline{ font-size:10px; color:var(--text-faint); letter-spacing:0.04em; }
 .conn-badge{ display:inline-flex; align-items:center; gap:6px; border:1px solid var(--border); background:var(--surface-2); color:var(--text-dim); padding:3px 9px; border-radius:999px; font-family:var(--font-mono); font-size:10.5px; letter-spacing:0.05em; text-transform:uppercase; }
 .conn-badge::before{ content:""; width:6px; height:6px; border-radius:50%; background:var(--text-faint); }
 .conn-badge.live{ border-color:var(--profit-soft); background:var(--profit-soft); color:var(--profit); }
@@ -110,6 +113,9 @@ button{ font-family:inherit; }
 .feed-route .tag{ font-family:var(--font-mono); font-size:10px; text-transform:uppercase; letter-spacing:0.03em; color:var(--text-dim); background:var(--surface-2); border:1px solid var(--border); border-radius:999px; padding:1px 7px; }
 .feed-net{ font-family:var(--font-mono); font-weight:500; text-align:right; }
 .feed-net.profit{ color:var(--profit); } .feed-net.warn{ color:var(--warning); }
+.feed-right{ display:flex; flex-direction:column; align-items:flex-end; gap:2px; }
+.feed-pnl{ font-family:var(--font-mono); font-size:10.5px; }
+.feed-pnl.profit{ color:var(--profit); } .feed-pnl.loss{ color:var(--loss); }
 .feed-empty{ padding:30px 14px; text-align:center; color:var(--text-faint); font-size:12px; }
 
 .hbar-row{ display:grid; grid-template-columns:118px 1fr 64px; gap:10px; align-items:center; padding:7px 0; }
@@ -135,6 +141,19 @@ button{ font-family:inherit; }
 .venue-chip{ display:flex; align-items:center; gap:8px; background:var(--surface-2); border:1px solid var(--border); border-radius:var(--radius-sm); padding:8px 10px; font-size:11.5px; }
 .venue-dot{ width:7px; height:7px; border-radius:50%; background:var(--profit); box-shadow:0 0 0 3px var(--profit-soft); }
 
+.venue-list{ max-height:340px; overflow-y:auto; display:flex; flex-direction:column; gap:6px; }
+.venue-row{ display:flex; align-items:center; gap:8px; background:var(--surface-2); border:1px solid var(--border); border-radius:var(--radius-sm); padding:8px 10px; font-size:11.5px; }
+.venue-row .venue-dot.off{ background:var(--text-faint); box-shadow:0 0 0 3px var(--surface-3); }
+.venue-row .vname{ flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.venue-key-badge{ font-family:var(--font-mono); font-size:9.5px; text-transform:uppercase; letter-spacing:0.04em; padding:2px 6px; border-radius:999px; }
+.venue-key-badge.set{ background:var(--profit-soft); color:var(--profit); }
+.venue-key-badge.unset{ background:var(--surface-3); color:var(--text-faint); }
+.venue-key-btn{ border:1px solid var(--border); background:transparent; color:var(--text-dim); font-family:var(--font-mono); font-size:10px; text-transform:uppercase; letter-spacing:0.03em; padding:4px 8px; border-radius:var(--radius-sm); cursor:pointer; }
+.venue-key-btn:hover{ background:var(--surface-3); color:var(--text); }
+.venue-note{ font-size:10.5px; color:var(--text-faint); padding:0 0 8px; line-height:1.5; }
+
+.field input[type="password"], .field input[type="text"]{ width:100%; background:var(--surface); border:1px solid var(--border); color:var(--text); padding:8px 9px; border-radius:var(--radius-sm); font-family:var(--font-mono); font-size:12.5px; }
+
 .modal-backdrop{ display:none; position:fixed; inset:0; background:rgba(4,5,9,0.72); z-index:50; align-items:center; justify-content:center; padding:20px; }
 .modal-backdrop.show{ display:flex; }
 .modal{ background:var(--surface); border:1px solid var(--critical); border-radius:var(--radius-md); max-width:460px; width:100%; padding:20px; display:flex; flex-direction:column; gap:14px; }
@@ -153,7 +172,10 @@ footer{ border-top:1px solid var(--border); padding:16px 20px; font-size:11.5px;
 <body>
 <div class="app">
   <div class="topbar">
-    <div class="brand"><h1>ARB ENGINE — DASHBOARD</h1></div>
+    <div class="brand">
+      <span class="brand-mark">K2</span>
+      <span class="brand-text"><h1>KbotV2</h1><span class="tagline">Powered by Tarek</span></span>
+    </div>
     <span class="conn-badge" id="connBadge">connecting…</span>
     <span class="mode-badge monitor" id="modeBadge">MONITOR</span>
     <button class="estop-btn" id="estopBtn">Emergency Stop</button>
@@ -224,8 +246,11 @@ footer{ border-top:1px solid var(--border); padding:16px 20px; font-size:11.5px;
             <div class="panel-body"><div class="decay-bars" id="decayBars"><p class="decay-empty">No decay checks recorded yet.</p></div></div>
           </div>
           <div class="panel">
-            <div class="panel-head"><h2>Connected venues</h2></div>
-            <div class="panel-body venue-grid" id="venueGrid"></div>
+            <div class="panel-head"><h2>Connected venues</h2><span class="note">API keys, per venue</span></div>
+            <div class="panel-body">
+              <p class="venue-note">Add your exchange API keys here so this venue can be used for <code class="mono">live</code> order placement. Keys are saved to this server's <code class="mono">.env</code> file, not sent anywhere else — but this page is plain HTTP, not HTTPS, so treat this the same as you would typing a password into any unencrypted form. SSH + editing <code class="mono">.env</code> directly stays the safer option.</p>
+              <div class="venue-list" id="venueList"></div>
+            </div>
           </div>
         </div>
       </div>
@@ -248,6 +273,20 @@ footer{ border-top:1px solid var(--border); padding:16px 20px; font-size:11.5px;
     <div class="modal-actions">
       <button class="btn ghost" id="liveCancel">Cancel</button>
       <button class="btn danger" id="liveConfirm" disabled>Confirm Live</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-backdrop" id="keyModal">
+  <div class="modal">
+    <h3 id="keyModalTitle" style="color:var(--accent);">API key</h3>
+    <p>Saved to this server's <code class="mono">.env</code> and used to reconnect this venue immediately. Never shown again on this page once saved.</p>
+    <div class="field"><label>API key</label><input type="password" id="keyApiKey" autocomplete="off"></div>
+    <div class="field"><label>API secret</label><input type="password" id="keyApiSecret" autocomplete="off"></div>
+    <div class="field"><label>Passphrase (only if this exchange requires one)</label><input type="password" id="keyApiPassphrase" autocomplete="off"></div>
+    <div class="modal-actions">
+      <button class="btn ghost" id="keyCancel">Cancel</button>
+      <button class="btn" id="keySave" style="background:var(--accent-soft); border-color:var(--accent-line); color:var(--accent);">Save &amp; connect</button>
     </div>
   </div>
 </div>
@@ -332,11 +371,6 @@ footer{ border-top:1px solid var(--border); padding:16px 20px; font-size:11.5px;
       });
     });
 
-    var venueGrid = $("#venueGrid");
-    venueGrid.innerHTML = s.connected_venues.map(function(v){
-      return '<div class="venue-chip"><span class="venue-dot"></span><span>'+v+'</span></div>';
-    }).join("") || '<span class="decay-empty">None connected.</span>';
-
     renderLatency(s.metrics && s.metrics.latency);
   }
 
@@ -386,16 +420,46 @@ footer{ border-top:1px solid var(--border); padding:16px 20px; font-size:11.5px;
     if(wrap.querySelector(".feed-empty")) wrap.innerHTML = "";
     var html = entries.map(function(o){
       var netClass = o.net_profit_pct >= 0.3 ? "profit" : "warn";
+      var pnlHtml = "";
+      if(o.pnl_usd !== null && o.pnl_usd !== undefined){
+        var pnlClass = o.pnl_usd > 0 ? "profit" : (o.pnl_usd < 0 ? "loss" : "");
+        pnlHtml = '<span class="feed-pnl '+pnlClass+'">'+(o.trade_mode?o.trade_mode+" ":"")+'P&amp;L '+fmtUsd(o.pnl_usd)+'</span>';
+      }
       return '<div class="feed-row">'+
         '<span class="feed-route"><span class="tag">'+o.strategy+'</span>'+(o.symbol||"")+
         ' &middot; '+(o.venues||[]).join(" → ")+'</span>'+
-        '<span class="feed-net '+netClass+'">+'+Number(o.net_profit_pct).toFixed(3)+'%</span>'+
+        '<span class="feed-right"><span class="feed-net '+netClass+'">+'+Number(o.net_profit_pct).toFixed(3)+'%</span>'+pnlHtml+'</span>'+
       '</div>';
     }).join("");
     if(prepend) wrap.insertAdjacentHTML("afterbegin", html);
     else wrap.innerHTML = html || '<div class="feed-empty">No opportunities recorded yet.</div>';
     while(wrap.children.length > 60) wrap.removeChild(wrap.lastChild);
   }
+
+  function renderVenues(venues){
+    var wrap = $("#venueList");
+    if(!venues || !venues.length){ wrap.innerHTML = '<span class="decay-empty">No venues configured.</span>'; return; }
+    wrap.innerHTML = venues.map(function(v){
+      return '<div class="venue-row">'+
+        '<span class="venue-dot'+(v.connected?"":" off")+'"></span>'+
+        '<span class="vname">'+v.name+'</span>'+
+        '<span class="venue-key-badge '+(v.has_credentials?"set":"unset")+'">'+(v.has_credentials?"key set":"no key")+'</span>'+
+        '<button class="venue-key-btn" data-venue-id="'+v.id+'" data-venue-name="'+v.name+'">'+(v.has_credentials?"Update":"Add key")+'</button>'+
+      '</div>';
+    }).join("");
+    wrap.querySelectorAll(".venue-key-btn").forEach(function(btn){
+      btn.addEventListener("click", function(){ openKeyModal(btn.getAttribute("data-venue-id"), btn.getAttribute("data-venue-name")); });
+    });
+  }
+
+  var keyModalVenueId = null;
+  function openKeyModal(venueId, venueName){
+    keyModalVenueId = venueId;
+    $("#keyModalTitle").textContent = "API key — " + venueName;
+    $("#keyApiKey").value = ""; $("#keyApiSecret").value = ""; $("#keyApiPassphrase").value = "";
+    $("#keyModal").classList.add("show");
+  }
+  function closeKeyModal(){ $("#keyModal").classList.remove("show"); keyModalVenueId = null; }
 
   /* ---------------- controls ---------------- */
   $all("#modeSeg button").forEach(function(btn){
@@ -423,6 +487,25 @@ footer{ border-top:1px solid var(--border); padding:16px 20px; font-size:11.5px;
   $("#haltClear").addEventListener("click", function(){
     api("/api/emergency_stop/clear", {method:"POST"}).then(applyState).catch(function(e){ showToast(e.message); });
   });
+  $("#keyCancel").addEventListener("click", closeKeyModal);
+  $("#keySave").addEventListener("click", function(){
+    if(!keyModalVenueId) return;
+    var apiKey = $("#keyApiKey").value.trim();
+    var secret = $("#keyApiSecret").value.trim();
+    var passphrase = $("#keyApiPassphrase").value.trim();
+    if(!apiKey || !secret){ showToast("API key and secret are both required."); return; }
+    var savedVenueId = keyModalVenueId;
+    api("/api/venues/" + encodeURIComponent(savedVenueId) + "/credentials", {
+      method:"POST",
+      body: JSON.stringify({api_key: apiKey, secret: secret, passphrase: passphrase || null})
+    }).then(function(result){
+      showToast(savedVenueId + ": " + (result.connected ? "key saved, connected." : "key saved, but reconnect failed — check the key."));
+      closeKeyModal();
+      loadVenues();
+    }).catch(function(e){ showToast(e.message); });
+  });
+  function loadVenues(){ api("/api/venues").then(renderVenues).catch(function(){}); }
+
   $("#saveLimits").addEventListener("click", function(){
     api("/api/risk_limits", {method:"POST", body: JSON.stringify({
       max_notional_per_trade_usd: Number($("#maxTrade").value),
@@ -460,14 +543,17 @@ footer{ border-top:1px solid var(--border); padding:16px 20px; font-size:11.5px;
   Promise.all([
     api("/api/state"),
     api("/api/opportunities?limit=50"),
-    api("/api/decay_summary")
+    api("/api/decay_summary"),
+    api("/api/venues")
   ]).then(function(results){
     applyState(results[0]);
     renderFeedEntries(results[1], false);
     renderDecay(results[2]);
+    renderVenues(results[3]);
   }).catch(function(e){ showToast("Could not load initial state: " + e.message); });
 
   setInterval(function(){ api("/api/decay_summary").then(renderDecay).catch(function(){}); }, 15000);
+  setInterval(loadVenues, 15000);
 
   connectWs();
 })();
