@@ -15,6 +15,7 @@ from fastapi.testclient import TestClient
 import dashboard.credentials as credentials_module
 from analytics.metrics import MetricsRegistry
 from analytics.recorder import OpportunityRecorder
+from config.venues import CEX_VENUES
 from core.book import BookStore
 from core.control import ControlState
 from core.rest_manager import RestManager
@@ -46,12 +47,14 @@ def test_get_venues_lists_all_configured_venues(tmp_path, monkeypatch):
 
     assert resp.status_code == 200
     venues = resp.json()
+    # Compare against config rather than naming a venue: the venue list is
+    # periodically re-tuned, and this test is about the endpoint exposing
+    # all of them, not about any particular exchange being present.
+    assert {v["id"] for v in venues} == set(CEX_VENUES)
     assert len(venues) >= 15
-    ids = {v["id"] for v in venues}
-    assert "binance" in ids
-    binance = next(v for v in venues if v["id"] == "binance")
-    assert binance["connected"] is False
-    assert binance["has_credentials"] is False
+    sample = venues[0]
+    assert sample["connected"] is False
+    assert sample["has_credentials"] is False
 
 
 def test_venue_credentials_never_echoes_the_secret(tmp_path, monkeypatch):
@@ -64,20 +67,20 @@ def test_venue_credentials_never_echoes_the_secret(tmp_path, monkeypatch):
     # write_credentials sets real process env vars (by design, so a live
     # reconnect picks them up) -- clean those up so this test can't leak
     # a fake credential into the rest of the suite's process environment.
-    monkeypatch.delenv("BINANCE_API_KEY", raising=False)
-    monkeypatch.delenv("BINANCE_SECRET", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_SECRET", raising=False)
 
     try:
-        resp = client.post("/api/venues/binance/credentials", json={"api_key": "AKIA_SECRET", "secret": "shh"})
+        resp = client.post("/api/venues/gemini/credentials", json={"api_key": "AKIA_SECRET", "secret": "shh"})
 
         assert resp.status_code == 200
         body = resp.json()
         assert "AKIA_SECRET" not in str(body)
         assert "shh" not in str(body)
-        assert body == {"id": "binance", "connected": True, "has_credentials": True}
+        assert body == {"id": "gemini", "connected": True, "has_credentials": True}
     finally:
-        os.environ.pop("BINANCE_API_KEY", None)
-        os.environ.pop("BINANCE_SECRET", None)
+        os.environ.pop("GEMINI_API_KEY", None)
+        os.environ.pop("GEMINI_SECRET", None)
 
 
 def test_venue_credentials_persisted_to_env_file_and_reflected_in_status(tmp_path, monkeypatch):

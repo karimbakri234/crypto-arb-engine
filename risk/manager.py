@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 from datetime import date
 
+from config.venues import min_order_usd_for
 from core.book import BookStore
 from risk.limits import RiskLimits
 from strategies.base import Opportunity
@@ -47,6 +48,12 @@ class RiskManager:
             self._current_day = today
             self.daily_pnl_usd = 0.0
             self.daily_trade_count = 0
+            # Safety net: deployed capital is normally released as each
+            # trade completes (see `record_result`). Clearing it here too
+            # means a leaked reservation can at worst stall trading until
+            # the next day rather than for the process's whole lifetime.
+            self._strategy_deployed_usd.clear()
+            self._venue_deployed_usd.clear()
 
     def can_trade(self, opportunity: Opportunity | None = None) -> bool:
         """Return False if any circuit breaker or limit blocks trading right now.
@@ -83,10 +90,12 @@ class RiskManager:
             return False
 
         if opportunity is not None:
+            # These fire per candidate opportunity, of which a busy tick has
+            # thousands -- debug, not info, or the log becomes the bottleneck.
             deployed = self._strategy_deployed_usd.get(opportunity.strategy, 0.0)
             cap = self.limits.strategy_capital_limit(opportunity.strategy)
             if deployed + opportunity.max_size_usd > cap:
-                logger.info(
+                logger.debug(
                     "Strategy %s capital cap reached (%.2f + %.2f > %.2f); skipping",
                     opportunity.strategy, deployed, opportunity.max_size_usd, cap,
                 )
@@ -96,7 +105,7 @@ class RiskManager:
                 venue_deployed = self._venue_deployed_usd.get(leg.venue_id, 0.0)
                 venue_cap = self.limits.venue_exposure_limit(leg.venue_id)
                 if venue_deployed + opportunity.max_size_usd > venue_cap:
-                    logger.info(
+                    logger.debug(
                         "Venue %s exposure cap reached (%.2f + %.2f > %.2f); skipping",
                         leg.venue_id, venue_deployed, opportunity.max_size_usd, venue_cap,
                     )
@@ -115,7 +124,9 @@ class RiskManager:
         Walks the real order book (not just top-of-book) to find the
         volume-weighted fill price at the opportunity's proposed size,
         and shrinks (or zeroes) the size if that VWAP price would eat
-        more than `max_slippage_pct` of the opportunity's edge.
+        more than `max_slippage_pct` of the opportunity's edge. Returns 0
+        for a size no venue on the route would accept (see
+        `_clears_venue_minimums`).
         """
         if not opportunity.legs:
             return 0.0
@@ -128,7 +139,12 @@ class RiskManager:
 
         book = book_store.get(buy_leg.venue_id, buy_leg.symbol)
         if book is None:
-            return proposed_usd  # no depth data available; fall back to top-of-book sizing upstream
+            # No depth data; fall back to top-of-book sizing upstream --
+            # but the venue minimum still applies, since it's a property
+            # of the venue rather than of the book we happen to have.
+            if not self._clears_venue_minimums(opportunity, proposed_usd):
+                return 0.0
+            return proposed_usd
 
         vwap_price, filled_size = book.snapshot().vwap_fill_price("buy", proposed_size)
         if filled_size <= 0 or vwap_price <= 0:
@@ -142,7 +158,29 @@ class RiskManager:
             )
             return 0.0
 
-        return min(proposed_usd, filled_size * vwap_price)
+        sized_usd = min(proposed_usd, filled_size * vwap_price)
+        if not self._clears_venue_minimums(opportunity, sized_usd):
+            return 0.0
+        return sized_usd
+
+    def _clears_venue_minimums(self, opportunity: Opportunity, size_usd: float) -> bool:
+        """Whether `size_usd` meets the minimum order notional on every leg's venue.
+
+        An opportunity sized below a venue's minimum is one that venue
+        would reject outright, so treating it as tradeable is worse than
+        finding nothing -- it inflates paper results with fills that could
+        never happen for real. The binding constraint is the largest
+        minimum across the legs, since every leg has to actually execute.
+        """
+        for leg in opportunity.legs:
+            minimum = min_order_usd_for(leg.venue_id)
+            if size_usd < minimum:
+                logger.info(
+                    "Rejecting %s: size $%.2f is below %s's $%.2f minimum order",
+                    opportunity, size_usd, leg.venue_id, minimum,
+                )
+                return False
+        return True
 
     def reverify_profitability(
         self,
@@ -204,18 +242,58 @@ class RiskManager:
         net_profit_pct = (total_proceeds - total_cost) / total_cost * 100.0
         return bool(net_profit_pct > 0.0), net_profit_pct
 
+    def commit(self, opportunity: Opportunity) -> None:
+        """Mark `opportunity`'s notional as deployed while it is in flight."""
+        self._strategy_deployed_usd[opportunity.strategy] = (
+            self._strategy_deployed_usd.get(opportunity.strategy, 0.0) + opportunity.max_size_usd
+        )
+        for leg in opportunity.legs:
+            self._venue_deployed_usd[leg.venue_id] = (
+                self._venue_deployed_usd.get(leg.venue_id, 0.0) + opportunity.max_size_usd
+            )
+
+    def release_uncommitted(self, opportunity: Opportunity) -> None:
+        """Return notional held by `commit` for a trade that never executed.
+
+        Callers commit before attempting a trade, but several paths bail
+        out afterwards (zero size after the depth check, the edge gone on
+        the as-of-now re-check). Without this the caps would ratchet up on
+        opportunities that never traded.
+        """
+        self._release(opportunity)
+
+    def _release(self, opportunity: Opportunity) -> None:
+        """Return `opportunity`'s notional to the available pool."""
+        strategy = opportunity.strategy
+        remaining = self._strategy_deployed_usd.get(strategy, 0.0) - opportunity.max_size_usd
+        self._strategy_deployed_usd[strategy] = max(0.0, remaining)
+        for leg in opportunity.legs:
+            venue_remaining = self._venue_deployed_usd.get(leg.venue_id, 0.0) - opportunity.max_size_usd
+            self._venue_deployed_usd[leg.venue_id] = max(0.0, venue_remaining)
+
     def record_result(self, opportunity: Opportunity, pnl_usd: float, success: bool) -> None:
-        """Record a completed (or failed) trade's outcome."""
+        """Record a completed (or failed) trade's outcome and free its capital.
+
+        `strategy_capital_usd` / `venue_exposure_usd` bound notional
+        deployed *at once* (see risk/limits.py), and every strategy here
+        is a round trip whose legs open and close together -- so the
+        capital is free again the moment the trade finishes, which is
+        exactly here.
+
+        This previously only ever *added* to the deployed totals and never
+        subtracted, with no daily reset either. Deployed capital therefore
+        ratcheted up until every strategy sat permanently at its cap and
+        the engine stopped trading for the rest of the process's life --
+        at the shipped defaults ($5,000 cap, $500 max notional) that was
+        after just 10 trades per strategy, versus a `max_trades_per_day`
+        of 2,000. A live paper run plateaued at 19 trades because of it.
+        """
         self._roll_day_if_needed()
         self.daily_pnl_usd += pnl_usd
         self.daily_trade_count += 1
         self.consecutive_failures = 0 if success else self.consecutive_failures + 1
 
-        self._strategy_deployed_usd[opportunity.strategy] = (
-            self._strategy_deployed_usd.get(opportunity.strategy, 0.0) + opportunity.max_size_usd
-        )
-        for leg in opportunity.legs:
-            self._venue_deployed_usd[leg.venue_id] = self._venue_deployed_usd.get(leg.venue_id, 0.0) + opportunity.max_size_usd
+        self._release(opportunity)
 
         logger.info(
             "Trade recorded: strategy=%s pnl=%.4f success=%s (day total=%.4f, count=%d, consecutive_failures=%d)",

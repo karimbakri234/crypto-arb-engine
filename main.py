@@ -30,14 +30,16 @@ from config.settings import (
     DASHBOARD_PASSWORD,
     DASHBOARD_PORT,
     DASHBOARD_USERNAME,
+    MAX_POLLED_SYMBOLS,
     MAX_TRADE_USD,
     METRICS_HTTP_PORT,
     METRICS_LOG_DUMP_INTERVAL_SEC,
+    MIN_VENUES_PER_SYMBOL,
     MODE,
     REST_POLL_INTERVAL_SEC,
     TIER_CONFIG,
 )
-from config.universe import build_tradeable_symbols, tier_of
+from config.universe import build_tradeable_symbols, select_pollable_symbols, tier_of
 from config.venues import ALL_CEX_IDS
 from core.book import BookStore
 from core.control import ControlState
@@ -52,18 +54,15 @@ from execution.reconciler import Reconciler
 from execution.router import Router
 from risk.manager import RiskManager
 from strategies.base import Opportunity, Strategy
-from strategies.basis_carry import BasisCarryStrategy
-from strategies.calendar_spread import CalendarSpreadStrategy
 from strategies.cex_dex import CexDexStrategy
 from strategies.cross_exchange import CrossExchangeStrategy
 from strategies.cross_quote import CrossQuoteStrategy
 from strategies.dex_dex import DexDexStrategy
-from strategies.funding_rate import FundingRateStrategy
 from strategies.latency_arb import LatencyArbStrategy
 from strategies.maker_rebate import MakerRebateStrategy
-from strategies.multi_leg import MultiLegStrategy
 from strategies.perp_perp import PerpPerpStrategy
 from strategies.stablecoin_depeg import StablecoinDepegStrategy
+from strategies.triangular import TriangularStrategy
 from strategies.wrapped_asset import WrappedAssetStrategy
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-8s %(name)s: %(message)s")
@@ -87,21 +86,48 @@ def build_strategies() -> list[Strategy]:
         # max_trade_usd, unlike every other strategy here.
         CexDexStrategy(),
         DexDexStrategy(),
-        FundingRateStrategy(max_trade_usd=MAX_TRADE_USD),
-        BasisCarryStrategy(max_trade_usd=MAX_TRADE_USD),
-        CalendarSpreadStrategy(max_trade_usd=MAX_TRADE_USD),
         CrossQuoteStrategy(max_trade_usd=MAX_TRADE_USD),
         StablecoinDepegStrategy(max_trade_usd=MAX_TRADE_USD),
         WrappedAssetStrategy(max_trade_usd=MAX_TRADE_USD),
         PerpPerpStrategy(max_trade_usd=MAX_TRADE_USD),
-        MultiLegStrategy(max_trade_usd=MAX_TRADE_USD),
         MakerRebateStrategy(max_trade_usd=MAX_TRADE_USD),
         LatencyArbStrategy(max_trade_usd=MAX_TRADE_USD),
-        # TriangularStrategy and StatisticalArbStrategy are intentionally
-        # left out of the default run: triangular needs no extra wiring
-        # (it's included via build_strategies below in a full deployment),
-        # and statistical needs an explicit, curated pairs list -- see
-        # strategies/statistical.py's constructor.
+        # 3 legs, not config's MAX_CYCLE_LENGTH of 5. Cycle-search cost grows
+        # exponentially with length while the edge needed to clear fees grows
+        # only linearly: measured at production universe size, length 5 costs
+        # ~9x the CPU of length 3 (206ms vs 23ms per tick) and needs ~1.0% of
+        # edge to break even at 0.20% taker per leg, versus ~0.6% for 3 legs.
+        # A 1% single-venue triangular edge on liquid pairs effectively does
+        # not occur, so the extra hops buy cost rather than opportunities.
+        TriangularStrategy(min_profit_pct=TIER_CONFIG["tier1"].min_profit_pct, max_cycle_length=3),
+        # Deliberately NOT in the default run:
+        #
+        # * FundingRateStrategy, BasisCarryStrategy, CalendarSpreadStrategy
+        #   read `MarketState.funding_rates` / `.futures_quotes`, which
+        #   nothing in this loop populates -- only the benchmark and unit
+        #   tests fill them synthetically. Running them against empty data
+        #   burns CPU every tick to correctly find nothing, which on a
+        #   small host is capacity taken from the strategies that do have
+        #   live data. Re-add them together with a real funding-rate /
+        #   futures-curve poller, not before.
+        #
+        # * MultiLegStrategy only emits routes containing at least one
+        #   `transfer` edge (it skips pure single-venue cycles as
+        #   triangular's job), and every transfer carries
+        #   `DEFAULT_TRANSFER_LATENCY_SEC` -- 15 minutes of withdrawal,
+        #   confirmation and deposit. A spread has to survive that entire
+        #   window to be capturable, which is the exact thing
+        #   execution/executor.py's module docstring explains does not
+        #   happen. Two concrete costs to leaving it on: it was ~84% of
+        #   every detection tick's CPU at production universe size, and in
+        #   `paper` mode its routes fill instantly with no transfer delay
+        #   simulated, inflating paper PnL with trades that cannot happen
+        #   for real. Re-enable it only as an inventory-rebalancing
+        #   planner, not as an arbitrage signal.
+        #
+        # * StatisticalArbStrategy needs an explicit, curated pairs list
+        #   (see its constructor) and carries real directional risk -- it
+        #   is not arbitrage. See README "Before running with real money".
     ]
 
 
@@ -141,26 +167,58 @@ async def _seed_inventory_for_mode(
 def _rescan_net_profit_pct(book_store: BookStore, opportunity: Opportunity) -> float | None:
     """Recompute an opportunity's approximate net profit % from live books.
 
-    Used by the decay-curve check (analytics/recorder.py). This is an
-    approximation: it re-derives buy/sell venue from `detail` and
-    recomputes the top-of-book spread fresh, using the same fee figures
-    the opportunity was originally priced with (fees don't change tick to
-    tick, prices do).
+    Used by the decay-curve check (analytics/recorder.py) -- the metric
+    that answers whether a detected spread would still have been there by
+    the time it could be traded.
+
+    This walks the opportunity's *own legs* against current top-of-book
+    rather than re-deriving a buy/sell venue pair from `detail`. An
+    earlier version only handled two-leg routes carrying explicit
+    `detail["buy_venue"]`/`["sell_venue"]` keys, which only 4 of the 15
+    strategies set; for every other strategy -- including `multi_leg` and
+    `cross_quote`, which dominate the live feed -- it returned `None`, and
+    the recorder scores `None` as "did not survive". The reported
+    capturable fraction was therefore biased sharply downward, counting
+    strategies it could not measure as decayed rather than as unmeasured.
+
+    Each leg is treated as a multiplicative conversion on a notional unit
+    and chained around the route, which is the same formulation
+    `core/graph.py` uses to price cycles in the first place:
+
+        buy  @ ask P -> holding x (1/P) x (1 - fee)
+        sell @ bid P -> holding x P x (1 - fee)
+        transfer     -> holding x (1 - fee)
+
+    Chaining rather than summing cost/proceeds matters because cycle
+    strategies (`multi_leg`, `triangular`, `cross_quote`) don't carry a
+    per-leg `size` -- they describe a closed loop of conversions, and a
+    notional-weighted sum would read zero for all of them.
+
+    Returns `None` only when a leg genuinely can't be repriced (venue
+    dropped out, empty book), which the recorder still treats as decayed.
     """
-    buy_venue = opportunity.detail.get("buy_venue")
-    sell_venue = opportunity.detail.get("sell_venue")
-    if not buy_venue or not sell_venue:
+    if not opportunity.legs:
         return None
-    buy_book = book_store.get(buy_venue, opportunity.symbol)
-    sell_book = book_store.get(sell_venue, opportunity.symbol)
-    if buy_book is None or sell_book is None:
-        return None
-    buy_state, sell_state = buy_book.snapshot(), sell_book.snapshot()
-    if buy_state.best_ask <= 0:
-        return None
-    fee_pct = sum(leg.fee for leg in opportunity.legs) * 100.0
-    gross_pct = (sell_state.best_bid - buy_state.best_ask) / buy_state.best_ask * 100.0
-    return gross_pct - fee_pct
+
+    holding = 1.0
+    for leg in opportunity.legs:
+        if leg.side == "transfer":
+            # No book to reprice: a transfer's cost is its withdrawal fee.
+            holding *= 1.0 - leg.fee
+            continue
+
+        book = book_store.get(leg.venue_id, leg.symbol)
+        if book is None:
+            return None
+        state = book.snapshot()
+        price = state.best_ask if leg.side == "buy" else state.best_bid
+        if price <= 0 or price == float("inf"):
+            return None
+
+        rate = (1.0 / price) if leg.side == "buy" else price
+        holding *= rate * (1.0 - leg.fee)
+
+    return (holding - 1.0) * 100.0
 
 
 async def run() -> None:
@@ -187,13 +245,33 @@ async def run() -> None:
 
         # Build the tradeable symbol list per venue from what it actually
         # lists, intersected with the configured universe -- never hardcoded.
-        symbols: set[str] = set()
+        symbols_by_venue: dict[str, set[str]] = {}
         for venue_id in connected:
             client = rest_manager.clients[venue_id]
             tiered_symbols = build_tradeable_symbols(client.markets)
-            symbols.update(s.symbol for s in tiered_symbols)
-        symbol_list = sorted(symbols)
-        logger.info("Tradeable universe: %d symbols across %d venues", len(symbol_list), len(connected))
+            symbols_by_venue[venue_id] = {s.symbol for s in tiered_symbols}
+
+        listed_total = len({s for listed in symbols_by_venue.values() for s in listed})
+        # Spend the REST poll budget on symbols that can actually produce a
+        # cross-venue trade, majors first -- see MAX_POLLED_SYMBOLS in
+        # config/settings.py for why this is bounded rather than "all of them".
+        symbol_list = select_pollable_symbols(
+            symbols_by_venue,
+            max_symbols=MAX_POLLED_SYMBOLS,
+            min_venues=MIN_VENUES_PER_SYMBOL,
+        )
+        logger.info(
+            "Tradeable universe: polling %d of %d listed symbols across %d venues "
+            "(symbols on >=%d venues, capped at %d -- see MAX_POLLED_SYMBOLS)",
+            len(symbol_list), listed_total, len(connected),
+            MIN_VENUES_PER_SYMBOL, MAX_POLLED_SYMBOLS,
+        )
+        if not symbol_list:
+            logger.error(
+                "No symbol is listed on >=%d connected venues; nothing to arbitrage. "
+                "Check venue connectivity above.", MIN_VENUES_PER_SYMBOL,
+            )
+            return
 
         seeded_modes: set[str] = set()
         if control.mode in ("paper", "live"):

@@ -74,17 +74,33 @@ class Executor:
         self.trade_log: list[TradeLogEntry] = []
 
     async def handle(self, opportunity: Opportunity) -> None:
-        """Route `opportunity` to the execution path for the current mode."""
+        """Route `opportunity` to the execution path for the current mode.
+
+        Monitor mode never commits capital -- it only logs -- so the
+        commit/release pair wraps just the paper and live paths.
+        """
         if not self.risk_manager.can_trade(opportunity):
             logger.debug("Risk manager declined opportunity: %s", opportunity)
             return
 
         if self.mode == Mode.MONITOR.value:
             self._handle_monitor(opportunity)
-        elif self.mode == Mode.PAPER.value:
-            self._handle_paper(opportunity)
-        elif self.mode == Mode.LIVE.value:
-            await self._handle_live(opportunity)
+            return
+
+        # Hold the notional against the strategy/venue caps for as long as
+        # the trade is in flight. `record_result` releases it on completion;
+        # the paths that bail out before trading release it here, or the
+        # caps would ratchet up on opportunities that never executed.
+        self.risk_manager.commit(opportunity)
+        traded = False
+        try:
+            if self.mode == Mode.PAPER.value:
+                traded = self._handle_paper(opportunity)
+            elif self.mode == Mode.LIVE.value:
+                traded = await self._handle_live(opportunity)
+        finally:
+            if not traded:
+                self.risk_manager.release_uncommitted(opportunity)
 
     def _handle_monitor(self, opportunity: Opportunity) -> None:
         logger.info("[MONITOR] %s", opportunity)
@@ -93,49 +109,53 @@ class Executor:
         """Fee-adjusted PnL estimate from an as-of-now net profit percentage."""
         return size_usd * (net_profit_pct / 100.0)
 
-    def _handle_paper(self, opportunity: Opportunity) -> None:
+    def _handle_paper(self, opportunity: Opportunity) -> bool:
+        """Simulate a fill. Returns whether a trade was actually recorded."""
         size_usd = self.risk_manager.size_with_depth_check(opportunity, self.book_store)
         if size_usd <= 0:
-            logger.info("[PAPER] Skipping zero-size (post-slippage-check) opportunity: %s", opportunity)
-            return
+            logger.debug("[PAPER] Skipping zero-size (post-slippage-check) opportunity: %s", opportunity)
+            return False
 
         still_profitable, net_profit_pct = self.risk_manager.reverify_profitability(
             opportunity, self.book_store, size_usd
         )
         if not still_profitable:
-            logger.info(
+            logger.debug(
                 "[PAPER] Skipping: no longer profitable as-of-now (recomputed net=%.4f%%): %s",
                 net_profit_pct, opportunity,
             )
-            return
+            return False
 
         pnl = self._estimate_pnl_usd(size_usd, net_profit_pct)
         self.risk_manager.record_result(opportunity, pnl, success=True)
         self.trade_log.append(TradeLogEntry(opportunity=opportunity, mode="paper", pnl_usd=pnl))
         logger.info("[PAPER] Simulated fill: size=$%.2f net_pnl=$%.4f (%s)", size_usd, pnl, opportunity)
+        return True
 
-    async def _handle_live(self, opportunity: Opportunity) -> None:
+    async def _handle_live(self, opportunity: Opportunity) -> bool:
         """Fire every leg of `opportunity` concurrently as real market orders.
 
         Every leg trades against pre-existing inventory (see module
         docstring). If any leg raises while others succeed, the
         reconciler is invoked immediately -- this leaves a one-sided
         position that requires an unwind trade, not silent acceptance.
+
+        Returns whether orders were actually placed.
         """
         size_usd = self.risk_manager.size_with_depth_check(opportunity, self.book_store)
         if size_usd <= 0:
-            logger.info("[LIVE] Skipping zero-size (post-slippage-check) opportunity: %s", opportunity)
-            return
+            logger.debug("[LIVE] Skipping zero-size (post-slippage-check) opportunity: %s", opportunity)
+            return False
 
         still_profitable, net_profit_pct = self.risk_manager.reverify_profitability(
             opportunity, self.book_store, size_usd
         )
         if not still_profitable:
-            logger.info(
+            logger.debug(
                 "[LIVE] Skipping: no longer profitable as-of-now (recomputed net=%.4f%%); real money stays put: %s",
                 net_profit_pct, opportunity,
             )
-            return
+            return False
 
         logger.warning("[LIVE] Firing %d leg(s) for %s (size=$%.2f)", len(opportunity.legs), opportunity, size_usd)
 
@@ -161,6 +181,7 @@ class Executor:
 
         if all_ok:
             logger.info("[LIVE] All legs filled successfully. Estimated net PnL=$%.4f", pnl)
+        return True
 
     async def _execute_leg(self, leg: Leg, size_usd: float, opportunity: Opportunity) -> dict:
         """Place one leg's market order. Non-CEX venues (DEX/synthetic) raise

@@ -34,13 +34,50 @@ class TierConfig:
 # Scan cost scales with universe size, so higher tiers (majors) get polled
 # more frequently and can tolerate a slightly lower profit threshold since
 # their books are deeper and quotes are more reliable.
+#
+# THE REST POLLING BUDGET (why these numbers, and why the universe is capped)
+# --------------------------------------------------------------------------
+# Keeping `N` symbols fresh across `V` venues at interval `T` costs
+# `V * N / T` requests/second, and public exchange endpoints tolerate
+# roughly 10-30 req/s each (see `rate_limit_per_min` per venue in
+# config/venues.py). Exceeding that does not fetch more data: ccxt's
+# rate limiter queues the surplus, so books arrive later and later and
+# *everything* goes stale -- including the majors that actually matter.
+#
+# There is also a hard floor: a symbol polled less often than
+# `PRICE_STALENESS_SEC` is filtered out as stale on essentially every
+# tick, so slowing a tier down past that removes it from the engine
+# entirely rather than saving anything useful.
+#
+# Those two constraints together (`T <= PRICE_STALENESS_SEC` and
+# `V * N / T` inside the venues' limits) are what bound `MAX_POLLED_SYMBOLS`
+# below. At 20 venues and these intervals a full 24-symbol working set
+# costs ~320 req/s, or ~16 req/s per venue -- inside most venues' limits
+# and under the staleness floor.
+#
+# This ceiling is a property of REST polling, not of this engine. Real
+# websocket streams (ccxt.pro, see core/feed_manager.py) push updates
+# instead of being polled for them, which lifts it by orders of magnitude
+# and is the upgrade that makes a wide universe worth having.
 TIER_CONFIG: dict[str, TierConfig] = {
-    "tier1": TierConfig(name="tier1", poll_interval_sec=0.5, min_profit_pct=0.15),
-    "tier2": TierConfig(name="tier2", poll_interval_sec=2.0, min_profit_pct=0.30),
-    "tier3": TierConfig(name="tier3", poll_interval_sec=5.0, min_profit_pct=0.50),
-    "stable": TierConfig(name="stable", poll_interval_sec=1.0, min_profit_pct=0.05),
-    "wrapped": TierConfig(name="wrapped", poll_interval_sec=2.0, min_profit_pct=0.10),
+    "tier1": TierConfig(name="tier1", poll_interval_sec=1.5, min_profit_pct=0.15),
+    "tier2": TierConfig(name="tier2", poll_interval_sec=2.5, min_profit_pct=0.30),
+    "tier3": TierConfig(name="tier3", poll_interval_sec=3.0, min_profit_pct=0.50),
+    "stable": TierConfig(name="stable", poll_interval_sec=2.0, min_profit_pct=0.05),
+    "wrapped": TierConfig(name="wrapped", poll_interval_sec=2.5, min_profit_pct=0.10),
 }
+
+# Ceiling on how many distinct symbols the REST feed keeps fresh. See the
+# budget note above: this is the number the rate limits and the staleness
+# floor actually permit, not a number of symbols the engine "supports".
+# Raising it without moving to websocket feeds buys stale books, not
+# broader coverage. Symbols are chosen most-arbitrageable first
+# (`config.universe.select_pollable_symbols`).
+MAX_POLLED_SYMBOLS: int = int(os.getenv("MAX_POLLED_SYMBOLS", "24"))
+
+# A symbol listed on fewer than this many connected venues cannot produce
+# a cross-venue opportunity, so it is not worth any poll budget.
+MIN_VENUES_PER_SYMBOL: int = int(os.getenv("MIN_VENUES_PER_SYMBOL", "2"))
 
 # ---------------------------------------------------------------------------
 # General tunables
@@ -51,6 +88,13 @@ TAKER_FEE_FALLBACK: float = 0.001
 MAKER_FEE_FALLBACK: float = 0.0002
 PRICE_STALENESS_SEC: float = 3.0
 REST_POLL_INTERVAL_SEC: float = 2.0
+
+# Ceiling on simultaneously in-flight REST order-book requests across all
+# venues (see `core.rest_manager.RestManager.poll_loop`). Without a cap,
+# a full universe issues venues x symbols -- thousands -- of concurrent
+# requests per cycle, which exceeds every exchange's rate limit and holds
+# thousands of connection buffers open at once on the host.
+MAX_CONCURRENT_POLLS: int = int(os.getenv("MAX_CONCURRENT_POLLS", "40"))
 
 # Depegs below this are noise; at/above this a stablecoin pair is flagged
 # and, past the kill-switch threshold, treated as a solvency event rather

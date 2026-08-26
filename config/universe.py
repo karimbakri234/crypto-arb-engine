@@ -108,6 +108,75 @@ def build_tradeable_symbols(
     return tradeable
 
 
+#: Order tiers are given up when the symbol budget is exceeded -- majors
+#: last, long-tail alts first, since arbitrage edge concentrates in liquid
+#: books and the long tail mostly produces spreads too thin to clear fees.
+_TIER_PRIORITY: tuple[str, ...] = ("tier1", "stable", "wrapped", "tier2", "tier3")
+
+#: Position of each base asset inside its own tier tuple. The tier tuples
+#: above are written roughly in descending liquidity order, so this doubles
+#: as a liquidity rank and is what keeps a budget cut from dropping ETH
+#: while keeping ADA.
+_BASE_RANK: dict[str, int] = {
+    base: index
+    for tier in (TIER_1, TIER_2, TIER_3, STABLECOINS, WRAPPED_ASSETS)
+    for index, base in enumerate(tier)
+}
+
+
+def _symbol_rank(symbol: str, venue_count: int) -> tuple[int, int, int, int, str]:
+    """Sort key for poll-budget priority; lower sorts first.
+
+    Ordered by tier, then the base asset's liquidity rank within that
+    tier, then quote asset (`QUOTE_ASSETS` is written most-liquid first,
+    so USDT/USDC books beat the same base quoted in EUR or ETH), then how
+    many venues list it, and finally the name purely for determinism.
+
+    Base-and-quote rank must come before venue count: without it the
+    ordering degenerates to alphabetical among equally-listed symbols,
+    which fills the whole budget with `ADA/*` and `AVAX/*` and never
+    reaches ETH or SOL at all.
+    """
+    base, _, quote = symbol.partition("/")
+    tier = tier_of(base)
+    tier_priority = _TIER_PRIORITY.index(tier) if tier in _TIER_PRIORITY else len(_TIER_PRIORITY)
+    base_rank = _BASE_RANK.get(base, len(_BASE_RANK))
+    quote_rank = QUOTE_ASSETS.index(quote) if quote in QUOTE_ASSETS else len(QUOTE_ASSETS)
+    return (tier_priority, base_rank, quote_rank, -venue_count, symbol)
+
+
+def select_pollable_symbols(
+    symbols_by_venue: dict[str, set[str]],
+    max_symbols: int,
+    min_venues: int = 2,
+) -> list[str]:
+    """Choose which symbols are worth spending poll budget on.
+
+    REST polling is a hard budget: every exchange rate-limits public
+    endpoints well below what `venues x symbols` demands at full universe
+    size, and exceeding it doesn't fetch more data -- it queues, so
+    *everything* goes stale, including the majors that matter. Two filters
+    keep the working set inside that budget:
+
+    * **`min_venues`**: a symbol listed on only one connected venue cannot
+      produce a cross-venue opportunity, so polling it is pure waste. This
+      is free to apply -- it removes no reachable profit.
+    * **`max_symbols`**: whatever survives is capped by `_symbol_rank`,
+      which spends the budget on the most liquid bases in the most liquid
+      quotes first.
+
+    Returns the chosen symbols, most-arbitrageable first.
+    """
+    venue_count: dict[str, int] = {}
+    for listed in symbols_by_venue.values():
+        for symbol in listed:
+            venue_count[symbol] = venue_count.get(symbol, 0) + 1
+
+    eligible = [s for s, count in venue_count.items() if count >= min_venues]
+    eligible.sort(key=lambda s: _symbol_rank(s, venue_count[s]))
+    return eligible[:max_symbols] if max_symbols > 0 else eligible
+
+
 def build_stable_pairs(venue_markets: dict[str, str]) -> list[TieredSymbol]:
     """Build the stable/stable pair list actually listed on a venue.
 

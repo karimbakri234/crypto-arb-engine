@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from config.venues import CEX_VENUES
 from execution.inventory import InventoryManager
 
 
@@ -47,6 +48,12 @@ def test_imbalance_report_empty_when_balanced():
 
 
 def test_estimate_transfer_uses_venue_withdrawal_fee():
-    estimate = InventoryManager.estimate_transfer("binance", "kraken", "BTC")
-    assert estimate.fee_units == 0.0002  # from config.venues CEX_VENUES["binance"]
+    # Read the expected fee from config rather than hardcoding a number
+    # (and a venue): the venue list is periodically re-tuned, and this
+    # test is about the lookup wiring, not any one exchange's fee.
+    expected = CEX_VENUES["kraken"].withdrawal_fees["BTC"]
+
+    estimate = InventoryManager.estimate_transfer("kraken", "gemini", "BTC")
+
+    assert estimate.fee_units == expected
     assert estimate.latency_sec > 0

@@ -18,6 +18,24 @@ from core.graph import CurrencyGraph, Edge
 from core.market_state import MarketState
 from strategies.base import Leg, Opportunity, Strategy
 
+# Hard ceiling on edges traversed per find_cycles call (see core/graph.py).
+# Bounded DFS is still exponential in branching factor: a venue that lists
+# many pairs over a few hub assets produces a dense graph, and without a
+# cap one dense venue turns an otherwise ~1ms tick into a multi-hundred-
+# millisecond one. Capping trades exhaustive enumeration -- which nothing
+# downstream needs, since only the best few cycles are ever executed --
+# for a bounded, predictable per-tick cost.
+MAX_CYCLE_SEARCH_EXPANSIONS = 2000
+
+# A cycle is discovered once per node it can be entered from, and the
+# rotations are thrown away by the de-duplication pass at the end of
+# `_scan_venue` -- so searching from every asset does length-many times
+# the work to produce the same set. Every tradeable pair is quoted in one
+# of these hubs, so a real triangular cycle passes through at least one of
+# them and is still found. Restricting start nodes this way was ~97% of
+# the detection tick's cost at production universe size.
+HUB_ASSETS: frozenset[str] = frozenset({"USDT", "USDC", "BTC", "ETH"})
+
 
 def build_venue_graph(market_state: MarketState, venue_id: str) -> CurrencyGraph:
     """Build the currency graph for one venue from its current order books."""
@@ -67,8 +85,11 @@ class TriangularStrategy(Strategy):
         graph = build_venue_graph(market_state, venue_id)
         opportunities: list[Opportunity] = []
 
-        for start_asset in graph.nodes():
-            for cycle in graph.find_cycles(start_asset, self.max_cycle_length):
+        hub_starts = [asset for asset in graph.nodes() if asset in HUB_ASSETS]
+        for start_asset in hub_starts:
+            for cycle in graph.find_cycles(
+                start_asset, self.max_cycle_length, max_expansions=MAX_CYCLE_SEARCH_EXPANSIONS
+            ):
                 if cycle.profit_pct < self.min_profit_pct:
                     continue
 
