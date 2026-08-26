@@ -150,10 +150,20 @@ class BookStore:
 
     The feed loop is the sole writer; detection strategies are
     concurrent readers. No lock is required (see module docstring).
+
+    `_by_symbol` is a secondary index kept in sync by `get_or_create`
+    (the only place a book is ever added). Without it, `all_for_symbol`
+    scanned every `(venue, symbol)` entry in the store on every call --
+    with a full symbol/venue universe (hundreds of symbols x a dozen-plus
+    venues), and every symbol-scanning strategy calling it once per
+    symbol per detection tick, that made book lookup the dominant cost
+    of the `state_to_detect` stage: O(symbols x total_books) instead of
+    the O(venues_per_symbol) this index gives it.
     """
 
     def __init__(self) -> None:
         self._books: dict[tuple[str, str], OrderBook] = {}
+        self._by_symbol: dict[str, list[OrderBook]] = {}
 
     def get_or_create(self, venue_id: str, symbol: str) -> OrderBook:
         key = (venue_id, symbol)
@@ -161,16 +171,17 @@ class BookStore:
         if book is None:
             book = OrderBook(venue_id, symbol)
             self._books[key] = book
+            self._by_symbol.setdefault(symbol, []).append(book)
         return book
 
     def get(self, venue_id: str, symbol: str) -> OrderBook | None:
         return self._books.get((venue_id, symbol))
 
     def all_for_symbol(self, symbol: str) -> list[OrderBook]:
-        return [book for (v, s), book in self._books.items() if s == symbol]
+        return list(self._by_symbol.get(symbol, []))
 
     def venues_for_symbol(self, symbol: str) -> list[str]:
-        return [v for (v, s) in self._books if s == symbol]
+        return [book.venue_id for book in self._by_symbol.get(symbol, [])]
 
     def all_symbols(self) -> set[str]:
         return {s for (_v, s) in self._books}

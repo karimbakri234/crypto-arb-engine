@@ -99,6 +99,7 @@ All 15 strategies implement `strategies.base.Strategy.scan(market_state) -> list
 - **orjson** for the `/metrics` JSON endpoint and other hot-path serialization.
 - **Vectorized detection**: `cross_exchange`, `perp_perp`, `maker_rebate`, and `latency_arb` compute the full venue x venue spread matrix as one numpy operation instead of a Python double loop.
 - **Lock-free order book reads**: `core/book.py`'s `OrderBook` swaps an immutable `BookState` reference on each update; readers never see a torn state and never need a lock (see that module's docstring for why this is safe under the GIL).
+- **O(1) symbol lookup**: `BookStore.all_for_symbol`/`venues_for_symbol` are backed by a `dict[symbol, list[OrderBook]]` index maintained in `get_or_create`. Before this, both scanned every `(venue, symbol)` entry in the store per call — with a full universe (hundreds of symbols x a dozen-plus venues) and every symbol-scanning strategy calling this once per symbol per tick, that made book lookup, not the strategy math, the dominant real-world cost of the `state_to_detect` stage. This was found and fixed after a live deployment on a small VPS showed `state_to_detect` blowing its 5ms budget by 15-25x on every tick — see the benchmark note below for the measured before/after.
 - **Feed/detect separation**: `core/feed_manager.py` only ever writes into `BookStore`; strategies only ever read from it. A slow detection pass cannot block ingestion.
 - **Precomputed statics**: fee tables, the universe, and venue metadata are all loaded once at startup (`config/`), never recomputed per tick.
 - **msgspec.Struct** (with `gc=False`) for the hottest per-tick objects (`Quote`, `OpportunitySignal`); `slots=True` dataclasses everywhere else.
@@ -110,24 +111,26 @@ Measured with `python -m benchmarks.bench_detection` on a synthetic snapshot at 
 
 ```
 strategy                scans/sec  avg ms/scan  avg opps/scan
-cross_exchange               26.0       38.407        5796.00
-triangular                 1158.3        0.863           0.00
-cex_dex                     383.0        2.611           0.00
-dex_dex                    6301.3        0.159          23.00
-funding_rate              14224.6        0.070           0.00
-basis_carry                2548.7        0.392         141.00
-calendar_spread            2806.3        0.356         100.00
-cross_quote                  99.0       10.103           0.00
-stablecoin_depeg            652.1        1.533           0.00
-wrapped_asset               867.5        1.153           0.00
-perp_perp                   782.8        1.277           0.00
-statistical                7141.3        0.140           0.00
-multi_leg                  1254.9        0.797           0.00
-maker_rebate                106.2        9.413           0.00
-latency_arb                 108.9        9.184           0.00
+cross_exchange               29.9       33.439        5796.00
+triangular                 1630.5        0.613           0.00
+cex_dex                     505.5        1.978           0.00
+dex_dex                    14803.4        0.068          23.00
+funding_rate              17883.0        0.056           0.00
+basis_carry                3394.7        0.295         141.00
+calendar_spread            3613.9        0.277         100.00
+cross_quote                  317.1        3.153           0.00
+stablecoin_depeg            805.7        1.241           0.00
+wrapped_asset              7618.2        0.131           0.00
+perp_perp                 10918.7        0.092           0.00
+statistical               102042.4        0.010           0.00
+multi_leg                  1585.1        0.631           0.00
+maker_rebate               2874.9        0.348           0.00
+latency_arb                2902.6        0.345           0.00
 ```
 
-`cross_exchange` is the slowest per-scan despite being fully vectorized — on this synthetic snapshot (every venue quoting every symbol with a small random spread) it finds **6,211 opportunities per scan**, and constructing that many `Opportunity` Python objects dominates the wall-clock cost, not the numpy matrix math itself. `cross_quote`, `maker_rebate`, and `latency_arb` are the next slowest because they run the vectorized comparison independently per symbol across a 140-symbol loop rather than once globally. `triangular` and `multi_leg` (graph search) land in the middle — cheaper than the busiest matrix strategies here, but architecturally more expensive per comparison than a matrix op; their cost scales with cycle length and venue connectivity rather than symbol count. Re-run `python -m benchmarks.bench_detection` on your own hardware before relying on these numbers.
+`cross_exchange` is still the slowest per-scan despite being fully vectorized — on this synthetic snapshot (every venue quoting every symbol with a small random spread) it finds **5,796 opportunities per scan**, and constructing that many `Opportunity` Python objects dominates the wall-clock cost, not the numpy matrix math itself; real market data finds nowhere near this many genuine spreads per tick, so this number overstates cross_exchange's real-world cost. `triangular` and `multi_leg` (graph search) land in the middle — cheaper than the busiest matrix strategies here, but architecturally more expensive per comparison than a matrix op; their cost scales with cycle length and venue connectivity rather than symbol count. Re-run `python -m benchmarks.bench_detection` on your own hardware before relying on these numbers.
+
+**Before/after the `BookStore` index fix above**, on this same synthetic snapshot: total per-tick cost across all 15 strategies dropped from ~75ms to ~43ms (-43%), and `cross_quote`/`maker_rebate`/`latency_arb`/`wrapped_asset`/`perp_perp` — every strategy that scans symbols one at a time and calls into `BookStore` per symbol — dropped 60-95% each, since their cost had been dominated by the O(symbols × total_books) lookup, not their own math. On a resource-constrained deployment (a small VPS, REST-polling a large symbol universe) this is the difference between `state_to_detect` blowing its 5ms budget by ~15x vs. by several times — still over budget on weak hardware (that budget assumes a genuinely fast machine feeding real websocket streams, not a $6/month VPS), but no longer inflated by a data-structure bug on top of that. A one-off multi-second spike on top of the typical numbers is a separate symptom (most likely swap activity on a memory-constrained host, not this code path) — check `free -h`/`vmstat` on the box if you see that.
 
 ## Profitability instrumentation
 
@@ -186,7 +189,7 @@ Read this section in full before ever setting `ARB_MODE=live`.
 ## Testing
 
 ```bash
-pytest         # 113 tests: core, all 15 strategies, execution/risk (incl. the pre-execution profitability re-check), dashboard API + Basic Auth, hypothesis property tests -- no live network calls
+pytest         # 115 tests: core (incl. the O(1) BookStore symbol index), all 15 strategies, execution/risk (incl. the pre-execution profitability re-check), dashboard API + Basic Auth, hypothesis property tests -- no live network calls
 ruff check .   # clean
 python -m benchmarks.bench_detection
 ```

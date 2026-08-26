@@ -60,3 +60,28 @@ def test_book_store_lookup_helpers():
     assert store.all_symbols() == {"BTC/USDT", "ETH/USDT"}
     assert store.all_venues() == {"binance", "kraken"}
     assert store.get("nonexistent", "BTC/USDT") is None
+
+
+def test_all_for_symbol_returns_empty_for_unknown_symbol():
+    store = BookStore()
+    store.get_or_create("binance", "BTC/USDT")
+
+    assert store.all_for_symbol("ETH/USDT") == []
+    assert store.venues_for_symbol("ETH/USDT") == []
+
+
+def test_repeated_get_or_create_does_not_duplicate_symbol_index_entries():
+    """get_or_create is called on every feed update for an existing book --
+    the symbol index it maintains must stay in sync (one entry per real
+    book) rather than growing an entry every time the same key is fetched
+    again, which would silently make `all_for_symbol` slower and slower
+    over a long-running process and return the same book multiple times."""
+    store = BookStore()
+    for _ in range(5):
+        store.get_or_create("binance", "BTC/USDT")
+    store.get_or_create("kraken", "BTC/USDT")
+
+    books = store.all_for_symbol("BTC/USDT")
+
+    assert len(books) == 2
+    assert {b.venue_id for b in books} == {"binance", "kraken"}
