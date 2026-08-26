@@ -11,10 +11,12 @@ from __future__ import annotations
 
 import pytest
 
+from analytics.metrics import MetricsRegistry
 from core.book import BookStore
 from core.types import Mode
 from execution.executor import Executor
 from execution.reconciler import Reconciler
+from risk.limits import RiskLimits
 from risk.manager import RiskManager
 from strategies.base import Leg, Opportunity
 
@@ -82,3 +84,53 @@ async def test_live_trade_never_fires_orders_when_edge_vanished():
     await executor.handle(_opportunity())
 
     assert executor.trade_log == []
+
+
+@pytest.mark.asyncio
+async def test_rejection_reasons_are_counted_for_the_dashboard():
+    """Detection and execution counts diverging is normal, but without the
+    reason surfaced it's indistinguishable from a broken engine. The
+    per-opportunity skip logs are at debug level (a busy tick emits
+    thousands), so these counters are what make it explainable."""
+    metrics = MetricsRegistry()
+    store = BookStore()
+    executor = Executor(
+        rest_manager=None,
+        risk_manager=RiskManager(),
+        reconciler=Reconciler(),
+        book_store=store,
+        mode=Mode.PAPER.value,
+        metrics=metrics,
+    )
+    # Both venues quote the same book: the edge is gone at execution time.
+    store.get_or_create("kraken", "BTC/USDT").replace(bids=[(99.9, 50.0)], asks=[(100.0, 50.0)])
+    store.get_or_create("gemini", "BTC/USDT").replace(bids=[(99.9, 50.0)], asks=[(100.0, 50.0)])
+    opp = _opportunity(size_usd=500.0)
+    opp.legs[0].venue_id = "kraken"
+    opp.legs[1].venue_id = "gemini"
+
+    await executor.handle(opp)
+
+    assert executor.trade_log == []
+    assert metrics.snapshot()["rejections"] == {"edge_gone_before_execution": 1}
+
+
+@pytest.mark.asyncio
+async def test_below_minimum_rejection_is_counted_separately():
+    metrics = MetricsRegistry()
+    store = BookStore()
+    executor = Executor(
+        rest_manager=None,
+        risk_manager=RiskManager(RiskLimits(max_notional_per_trade_usd=1.0)),
+        reconciler=Reconciler(),
+        book_store=store,
+        mode=Mode.PAPER.value,
+        metrics=metrics,
+    )
+    store.get_or_create("kraken", "BTC/USDT").replace(bids=[(99.9, 50.0)], asks=[(100.0, 50.0)])
+    opp = _opportunity(size_usd=1.0)
+    opp.legs[0].venue_id = "kraken"
+
+    await executor.handle(opp)
+
+    assert metrics.snapshot()["rejections"] == {"below_venue_minimum_or_slippage": 1}

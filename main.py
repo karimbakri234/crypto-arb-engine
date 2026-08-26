@@ -285,7 +285,7 @@ async def run() -> None:
         metrics.start_http_server(METRICS_HTTP_PORT)
         dump_task = asyncio.create_task(metrics.periodic_dump(METRICS_LOG_DUMP_INTERVAL_SEC, stop_event))
 
-        executor = Executor(rest_manager, risk_manager, reconciler, book_store, mode=control.mode)
+        executor = Executor(rest_manager, risk_manager, reconciler, book_store, mode=control.mode, metrics=metrics)
 
         if DASHBOARD_ENABLED:
             auth_configured = bool(DASHBOARD_USERNAME and DASHBOARD_PASSWORD)

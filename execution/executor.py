@@ -32,6 +32,7 @@ import asyncio
 import logging
 from dataclasses import dataclass
 
+from analytics.metrics import MetricsRegistry
 from core.book import BookStore
 from core.rest_manager import RestManager
 from core.types import Mode
@@ -62,6 +63,7 @@ class Executor:
         reconciler: Reconciler,
         book_store: BookStore,
         mode: str = Mode.MONITOR.value,
+        metrics: MetricsRegistry | None = None,
     ) -> None:
         valid_modes = {m.value for m in Mode}
         if mode not in valid_modes:
@@ -71,7 +73,19 @@ class Executor:
         self.reconciler = reconciler
         self.book_store = book_store
         self.mode = mode
+        self.metrics = metrics
         self.trade_log: list[TradeLogEntry] = []
+
+    def _reject(self, reason: str) -> None:
+        """Count why a detected opportunity didn't become a trade.
+
+        See `MetricsRegistry.record_rejection`: the per-opportunity skip
+        logs are at debug level (a busy tick emits thousands), so these
+        counters are what make "found opportunities, made no trades"
+        explainable rather than looking like a broken engine.
+        """
+        if self.metrics is not None:
+            self.metrics.record_rejection(reason)
 
     async def handle(self, opportunity: Opportunity) -> None:
         """Route `opportunity` to the execution path for the current mode.
@@ -81,6 +95,7 @@ class Executor:
         """
         if not self.risk_manager.can_trade(opportunity):
             logger.debug("Risk manager declined opportunity: %s", opportunity)
+            self._reject("risk_limits")
             return
 
         if self.mode == Mode.MONITOR.value:
@@ -114,6 +129,7 @@ class Executor:
         size_usd = self.risk_manager.size_with_depth_check(opportunity, self.book_store)
         if size_usd <= 0:
             logger.debug("[PAPER] Skipping zero-size (post-slippage-check) opportunity: %s", opportunity)
+            self._reject("below_venue_minimum_or_slippage")
             return False
 
         still_profitable, net_profit_pct = self.risk_manager.reverify_profitability(
@@ -124,6 +140,7 @@ class Executor:
                 "[PAPER] Skipping: no longer profitable as-of-now (recomputed net=%.4f%%): %s",
                 net_profit_pct, opportunity,
             )
+            self._reject("edge_gone_before_execution")
             return False
 
         pnl = self._estimate_pnl_usd(size_usd, net_profit_pct)
@@ -145,6 +162,7 @@ class Executor:
         size_usd = self.risk_manager.size_with_depth_check(opportunity, self.book_store)
         if size_usd <= 0:
             logger.debug("[LIVE] Skipping zero-size (post-slippage-check) opportunity: %s", opportunity)
+            self._reject("below_venue_minimum_or_slippage")
             return False
 
         still_profitable, net_profit_pct = self.risk_manager.reverify_profitability(
@@ -155,6 +173,7 @@ class Executor:
                 "[LIVE] Skipping: no longer profitable as-of-now (recomputed net=%.4f%%); real money stays put: %s",
                 net_profit_pct, opportunity,
             )
+            self._reject("edge_gone_before_execution")
             return False
 
         logger.warning("[LIVE] Firing %d leg(s) for %s (size=$%.2f)", len(opportunity.legs), opportunity, size_usd)

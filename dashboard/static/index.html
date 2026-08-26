@@ -246,6 +246,10 @@ footer{ border-top:1px solid var(--border); padding:16px 20px; font-size:11.5px;
             <div class="panel-body"><div class="decay-bars" id="decayBars"><p class="decay-empty">No decay checks recorded yet.</p></div></div>
           </div>
           <div class="panel">
+            <div class="panel-head"><h2>Why no trades</h2><span class="note">detected but not executed</span></div>
+            <div class="panel-body" id="rejectPanel"><p class="decay-empty">Nothing rejected yet.</p></div>
+          </div>
+          <div class="panel">
             <div class="panel-head"><h2>Connected venues</h2><span class="note">API keys, per venue</span></div>
             <div class="panel-body">
               <p class="venue-note">Add your exchange API keys here so this venue can be used for <code class="mono">live</code> order placement. Keys are saved to this server's <code class="mono">.env</code> file, not sent anywhere else — but this page is plain HTTP, not HTTPS, so treat this the same as you would typing a password into any unencrypted form. SSH + editing <code class="mono">.env</code> directly stays the safer option.</p>
@@ -372,6 +376,7 @@ footer{ border-top:1px solid var(--border); padding:16px 20px; font-size:11.5px;
     });
 
     renderLatency(s.metrics && s.metrics.latency);
+    renderRejections(s.metrics && s.metrics.rejections);
   }
 
   function renderLatency(latency){
@@ -395,6 +400,31 @@ footer{ border-top:1px solid var(--border); padding:16px 20px; font-size:11.5px;
         '<span class="hbar-val">'+p95.toFixed(2)+'ms</span>';
       wrap.appendChild(row);
     });
+  }
+
+  /* Detection and execution counts diverging is normal, not a fault -- most
+     detected spreads are gone or too small by the time they can be traded.
+     Showing the reason turns "found opportunities, made zero trades" from
+     something indistinguishable from a broken engine into a real answer. */
+  var REJECT_LABELS = {
+    below_venue_minimum_or_slippage: "Too small for the venue's minimum order, or the book was too thin to fill without excessive slippage.",
+    edge_gone_before_execution: "The spread had already closed by the time the trade was checked again — this is latency, not a bug.",
+    risk_limits: "Blocked by a risk limit (max notional, daily loss, trade count, or an exposure cap)."
+  };
+  function renderRejections(rejections){
+    var wrap = $("#rejectPanel");
+    var keys = Object.keys(rejections || {});
+    if(keys.length === 0){ wrap.innerHTML = '<p class="decay-empty">Nothing rejected yet.</p>'; return; }
+    var total = keys.reduce(function(a,k){ return a + rejections[k]; }, 0);
+    keys.sort(function(a,b){ return rejections[b] - rejections[a]; });
+    wrap.innerHTML = keys.map(function(k){
+      var pct = total ? (rejections[k] / total * 100) : 0;
+      return '<div class="hbar-row" style="grid-template-columns:1fr 64px;">'+
+        '<span class="label">'+k.replace(/_/g," ")+'</span>'+
+        '<span class="hbar-val">'+rejections[k].toLocaleString()+'</span>'+
+      '</div>'+
+      '<p class="venue-note" style="margin:-2px 0 8px;">'+(REJECT_LABELS[k] || "")+' ('+pct.toFixed(0)+'%)</p>';
+    }).join("");
   }
 
   function renderDecay(summary){

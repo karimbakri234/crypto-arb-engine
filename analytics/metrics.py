@@ -66,6 +66,7 @@ class MetricsRegistry:
         self._hits: dict[str, int] = {}
         self._misses: dict[str, int] = {}
         self._pnl_by_strategy: dict[str, float] = {}
+        self._rejections: dict[str, int] = {}
         self._http_server: ThreadingHTTPServer | None = None
         self._http_thread: threading.Thread | None = None
 
@@ -98,6 +99,22 @@ class MetricsRegistry:
         total = hits + misses
         return (hits / total) if total else 0.0
 
+    # -- Rejections -----------------------------------------------------------
+
+    def record_rejection(self, reason: str) -> None:
+        """Count one detected opportunity that did not become a trade.
+
+        Detection and execution counts diverging is the normal case, not a
+        fault -- most detected spreads are gone or too small by the time
+        they can be acted on. But without the reason surfaced, "found
+        thousands of opportunities, made zero trades" is indistinguishable
+        from a broken engine, and the per-opportunity skip logs are at
+        debug level precisely because a busy tick emits thousands of them.
+        Counting them instead makes the answer visible on the dashboard at
+        a glance and costs nothing per tick.
+        """
+        self._rejections[reason] = self._rejections.get(reason, 0) + 1
+
     # -- PnL attribution ------------------------------------------------------
 
     def record_pnl(self, strategy: str, pnl_usd: float) -> None:
@@ -110,6 +127,7 @@ class MetricsRegistry:
             "latency": {stage: h.summary() for stage, h in self._latency.items()},
             "hit_rate": {s: self.hit_rate(s) for s in set(self._hits) | set(self._misses)},
             "pnl_by_strategy_usd": dict(self._pnl_by_strategy),
+            "rejections": dict(self._rejections),
             "taken_at": time.time(),
         }
 
