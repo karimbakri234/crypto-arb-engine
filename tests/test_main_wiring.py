@@ -13,7 +13,7 @@ bug fails in CI instead of at 3am against a real exchange connection.
 from __future__ import annotations
 
 from core.book import BookStore
-from main import _rescan_net_profit_pct, build_strategies
+from main import _rescan_net_profit_pct, build_strategies, is_fillable
 from strategies.base import Leg, Opportunity, Strategy
 
 
@@ -119,3 +119,46 @@ def test_rescan_returns_none_when_a_venue_dropped_out():
     # gemini has no book at all
 
     assert _rescan_net_profit_pct(store, _two_leg_opportunity()) is None
+
+
+def _sized_opportunity(max_size_usd: float, venue: str = "kraken") -> Opportunity:
+    return Opportunity(
+        strategy="cross_exchange",
+        symbol="ADA/USDT",
+        legs=(
+            Leg(venue, "ADA/USDT", "buy", 1.0, 1.0, 0.001),
+            Leg("gemini", "ADA/USDT", "sell", 1.01, 1.0, 0.001),
+        ),
+        gross_profit_pct=1.0,
+        net_profit_pct=0.8,
+        max_size_usd=max_size_usd,
+    )
+
+
+def test_quote_with_no_size_behind_it_is_not_fillable():
+    """A venue can show an attractive top-of-book price with almost nothing
+    behind it. Reported as an opportunity it pollutes the feed and, worse,
+    the decay curve: a thin quote nobody wants sits unchanged for seconds
+    and scores as "survived" every time, dragging the capturable fraction
+    toward 100% -- exactly backwards."""
+    assert is_fillable(_sized_opportunity(max_size_usd=0.40)) is False
+
+
+def test_quote_clearing_every_leg_minimum_is_fillable():
+    assert is_fillable(_sized_opportunity(max_size_usd=500.0)) is True
+
+
+def test_the_largest_leg_minimum_binds():
+    """Every leg has to execute, so the strictest venue on the route sets
+    the floor -- bitstamp's $25 minimum, not the other leg's $10."""
+    strict = _sized_opportunity(max_size_usd=15.0, venue="bitstamp")
+
+    assert is_fillable(strict) is False
+    assert is_fillable(_sized_opportunity(max_size_usd=15.0, venue="kraken")) is True
+
+
+def test_legless_opportunity_is_not_fillable():
+    opp = _sized_opportunity(max_size_usd=500.0)
+    opp.legs = ()
+
+    assert is_fillable(opp) is False

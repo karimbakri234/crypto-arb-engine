@@ -40,7 +40,7 @@ from config.settings import (
     TIER_CONFIG,
 )
 from config.universe import build_tradeable_symbols, select_pollable_symbols, tier_of
-from config.venues import ALL_CEX_IDS
+from config.venues import ALL_CEX_IDS, min_order_usd_for
 from core.book import BookStore
 from core.control import ControlState
 from core.feed_manager import FeedManager
@@ -162,6 +162,33 @@ async def _seed_inventory_for_mode(
             except Exception as exc:
                 logger.warning("Could not fetch live balance for %s: %s", venue_id, exc)
         logger.warning("Fetched real account balances for live mode across %d venues", len(connected))
+
+
+def is_fillable(opportunity: Opportunity) -> bool:
+    """Whether `opportunity` has enough displayed size to be worth reporting.
+
+    A venue can quote an attractive top-of-book price with almost nothing
+    behind it. The spread is real in the sense that the numbers differ, but
+    it is not tradeable: every leg has to clear its venue's minimum order
+    notional, and the binding constraint is the largest minimum across the
+    route.
+
+    The executor already rejects these (`RiskManager.size_with_depth_check`),
+    but only *after* they have been recorded as opportunities -- which puts
+    unfillable quotes in the dashboard feed as if they were money, and, worse,
+    into the decay curve. That corrupts the single most important number in
+    the project: a thin quote nobody wants sits unchanged for seconds, so it
+    scores as "survived" every time and drags the capturable fraction toward
+    100%, exactly backwards from what it should measure. A real spread is
+    taken almost immediately; one that persists is evidence it *cannot* be
+    filled, not evidence that it could.
+
+    Filtering at detection keeps both the feed and the decay curve honest.
+    """
+    if not opportunity.legs:
+        return False
+    required = max(min_order_usd_for(leg.venue_id) for leg in opportunity.legs)
+    return opportunity.max_size_usd >= required
 
 
 def _rescan_net_profit_pct(book_store: BookStore, opportunity: Opportunity) -> float | None:
@@ -346,6 +373,16 @@ async def run() -> None:
                             )
                         else:
                             all_opportunities.extend(strategy.scan(market_state))
+
+                # Drop quotes with no real size behind them before they reach
+                # the feed or the decay curve -- see `is_fillable`.
+                fillable: list[Opportunity] = []
+                for opportunity in all_opportunities:
+                    if is_fillable(opportunity):
+                        fillable.append(opportunity)
+                    else:
+                        metrics.record_rejection("too_thin_to_fill")
+                all_opportunities = fillable
 
                 for opportunity in all_opportunities:
                     metrics.record_hit(opportunity.strategy, hit=True)
