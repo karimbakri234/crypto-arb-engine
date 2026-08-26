@@ -96,6 +96,14 @@ REST_POLL_INTERVAL_SEC: float = 2.0
 # thousands of connection buffers open at once on the host.
 MAX_CONCURRENT_POLLS: int = int(os.getenv("MAX_CONCURRENT_POLLS", "40"))
 
+# How many venues may be connecting at once at startup. `load_markets()`
+# holds a venue's entire market list until `RestManager` prunes it at the
+# end of that venue's connect, so connecting everything in parallel makes
+# peak memory scale with venue count -- a spike well above steady state,
+# arriving during startup when there is least headroom. Lower this if a
+# host is memory-constrained; raise it for faster startup on a large one.
+MAX_CONCURRENT_CONNECTS: int = int(os.getenv("MAX_CONCURRENT_CONNECTS", "4"))
+
 # Depegs below this are noise; at/above this a stablecoin pair is flagged
 # and, past the kill-switch threshold, treated as a solvency event rather
 # than an opportunity.

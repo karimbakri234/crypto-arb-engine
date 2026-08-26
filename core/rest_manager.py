@@ -32,7 +32,12 @@ import time
 
 import ccxt.async_support as ccxt
 
-from config.settings import MAX_CONCURRENT_POLLS, TIER_CONFIG, get_credentials
+from config.settings import (
+    MAX_CONCURRENT_CONNECTS,
+    MAX_CONCURRENT_POLLS,
+    TIER_CONFIG,
+    get_credentials,
+)
 from config.universe import ALL_BASE_ASSETS, QUOTE_ASSETS, STABLECOINS, tier_of
 from config.venues import CEX_VENUES, register_live_fees
 from core.book import BookStore
@@ -158,10 +163,27 @@ class RestManager:
         # Computed once: pruning runs per venue and this set never changes.
         self._universe = universe_symbols()
 
-    async def connect_all(self) -> list[str]:
-        """Connect to every venue concurrently; failures are logged and skipped."""
+    async def connect_all(self, max_concurrent: int = MAX_CONCURRENT_CONNECTS) -> list[str]:
+        """Connect to every venue; failures are logged and skipped.
+
+        Connections run concurrently but only `max_concurrent` at a time.
+        Fully-parallel connect looks faster, but `_connect_one` holds a
+        venue's *entire* market list in memory until pruning runs at the
+        end of that call -- so connecting 20 venues at once means peak
+        memory is 20 unpruned market maps held simultaneously, which is
+        far above steady state and lands during startup on a host that has
+        no headroom to spare. Bounding it caps that spike at
+        `max_concurrent` unpruned maps instead, at the cost of a few extra
+        seconds of startup.
+        """
+        semaphore = asyncio.Semaphore(max(1, max_concurrent))
+
+        async def connect_bounded(venue_id: str) -> None:
+            async with semaphore:
+                await self._connect_one(venue_id)
+
         results = await asyncio.gather(
-            *(self._connect_one(venue_id) for venue_id in self.venue_ids),
+            *(connect_bounded(venue_id) for venue_id in self.venue_ids),
             return_exceptions=True,
         )
         connected: list[str] = []
