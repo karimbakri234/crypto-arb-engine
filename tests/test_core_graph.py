@@ -64,3 +64,22 @@ def test_max_length_excludes_longer_cycles():
     cycles = graph.find_cycles("USDT", max_length=4)
     assert len(cycles) == 1
     assert cycles[0].length == 4
+
+
+def test_max_expansions_bounds_a_dense_graph_search():
+    """A real deployment hit this: adding more venues made the graph dense
+    enough that an uncapped search took state_to_detect from ~60ms to ~28s.
+    `max_expansions` must stop the search well before it exhaustively
+    enumerates every one of many independent profitable cycles."""
+    graph = CurrencyGraph()
+    for i in range(30):
+        b, c = f"B{i}", f"C{i}"
+        graph.add_edge(Edge("USDT", b, rate=1.05, fee=0.0, venue_id="x", symbol=f"{b}/USDT", side="buy"))
+        graph.add_edge(Edge(b, c, rate=1.05, fee=0.0, venue_id="x", symbol=f"{c}/{b}", side="buy"))
+        graph.add_edge(Edge(c, "USDT", rate=1.05, fee=0.0, venue_id="x", symbol=f"{c}/USDT", side="sell"))
+
+    unbounded = graph.find_cycles("USDT", max_length=4)
+    bounded = graph.find_cycles("USDT", max_length=4, max_expansions=10)
+
+    assert len(unbounded) == 30
+    assert 0 < len(bounded) < len(unbounded)

@@ -30,6 +30,28 @@ from strategies.base import Leg, Opportunity, Strategy
 DEFAULT_TRANSFER_LATENCY_SEC = 900.0  # 15 minutes, representative CEX withdrawal + deposit confirmation
 DEFAULT_WITHDRAWAL_FEE_FRACTION = 0.001
 
+# Connecting every pair of venues that share an asset costs O(venues^2)
+# transfer edges -- fine at ~15 venues, but at 24+ (each typically sharing
+# USDT/BTC/ETH/etc with most others) this is thousands of edges, and a
+# denser graph makes find_cycles' branching factor blow up combinatorially
+# (this is what caused a real state_to_detect spike from ~60ms to ~28s
+# going from 19 to 24 connected venues). Capping fan-out per asset bounds
+# graph density regardless of how many venues get added later.
+MAX_TRANSFER_VENUES_PER_ASSET = 5
+
+# A cycle can be discovered starting the search from *any* of its member
+# nodes -- searching from literally every node in the graph rediscovers
+# the same cycles length-many times over. Real multi-leg routes almost
+# always pass through a common hub asset anyway (that's where trading
+# capital naturally sits), so restricting DFS starts to hub-asset nodes
+# cuts the number of find_cycles calls by roughly (assets per venue), with
+# minimal loss of real coverage.
+HUB_ASSETS: frozenset[str] = frozenset({"USDT", "USDC", "BTC", "ETH"})
+
+# Hard ceiling on edges traversed per find_cycles call (see core/graph.py)
+# -- bounds one call's cost to a constant regardless of graph density.
+MAX_CYCLE_SEARCH_EXPANSIONS = 2000
+
 
 def _node(venue_id: str, asset: str) -> str:
     return f"{venue_id}:{asset}"
@@ -67,11 +89,14 @@ def build_cross_venue_graph(
         assets_by_venue.setdefault(venue_id, set()).add(asset)
 
     for venue_a in venues:
-        for venue_b in venues:
-            if venue_a == venue_b:
-                continue
-            common_assets = assets_by_venue.get(venue_a, set()) & assets_by_venue.get(venue_b, set())
-            for asset in common_assets:
+        # Deterministic ordering so the same venues are picked as transfer
+        # partners every tick (rather than dict/set iteration order, which
+        # would make the graph -- and its opportunities -- flicker tick to
+        # tick for no economic reason).
+        other_venues = sorted(v for v in venues if v != venue_a)
+        for asset in assets_by_venue.get(venue_a, set()):
+            partners = [v for v in other_venues if asset in assets_by_venue.get(v, set())]
+            for venue_b in partners[:MAX_TRANSFER_VENUES_PER_ASSET]:
                 price = prices.get((venue_a, asset), 1.0)
                 withdrawal_fee_units = CEX_VENUES.get(venue_a, None)
                 flat_fee = withdrawal_fee_units.withdrawal_fees.get(asset, 0.0) if withdrawal_fee_units else 0.0
@@ -110,8 +135,9 @@ class MultiLegStrategy(Strategy):
 
         opportunities: list[Opportunity] = []
         seen: set[frozenset] = set()
-        for start_node in graph.nodes():
-            for cycle in graph.find_cycles(start_node, self.max_path_length):
+        hub_start_nodes = [node for node in graph.nodes() if node.rsplit(":", 1)[-1] in HUB_ASSETS]
+        for start_node in hub_start_nodes:
+            for cycle in graph.find_cycles(start_node, self.max_path_length, max_expansions=MAX_CYCLE_SEARCH_EXPANSIONS):
                 # Only routes using at least one transfer edge are genuinely
                 # "multi-leg composite" -- pure single-venue cycles are just
                 # triangular arbitrage and are already covered there.

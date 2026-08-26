@@ -25,8 +25,11 @@ brute-forcing every combination of markets by hand.
 
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,14 +86,21 @@ class CurrencyGraph:
     def edges_from(self, asset: str) -> list[Edge]:
         return self._adjacency.get(asset, [])
 
-    def find_cycles(self, start_asset: str, max_length: int) -> list[Cycle]:
+    def find_cycles(self, start_asset: str, max_length: int, max_expansions: int | None = None) -> list[Cycle]:
         """Enumerate profitable simple cycles through `start_asset`.
 
         Bounded DFS up to `max_length` hops. A cycle is "profitable" if
         its total weight is negative (equivalently, `profit_pct > 0`).
         Only simple cycles (no repeated intermediate asset) are
-        considered, which keeps the search space bounded even on a dense
-        graph.
+        considered, which keeps the search space bounded on a sparse
+        graph -- but branching is still up to (out-degree)^max_length in
+        the worst case, and out-degree grows with how many venues share
+        an asset. `max_expansions` (if given) caps the total number of
+        edges this call will ever traverse, so one call's cost is bounded
+        by a constant regardless of how dense the graph gets -- past that
+        point the search stops early and returns whatever it already
+        found rather than exhaustively enumerating every path. `None`
+        means unbounded (the original behavior).
         """
         if start_asset not in self._adjacency:
             return []
@@ -99,11 +109,18 @@ class CurrencyGraph:
         path_assets: list[str] = [start_asset]
         path_edges: list[Edge] = []
         visited: set[str] = {start_asset}
+        expansions = 0
+        truncated = False
 
         def dfs(current: str, total_weight: float) -> None:
+            nonlocal expansions, truncated
             if len(path_edges) >= max_length:
                 return
             for edge in self._adjacency.get(current, []):
+                if max_expansions is not None and expansions >= max_expansions:
+                    truncated = True
+                    return
+                expansions += 1
                 if edge.dst == start_asset and len(path_edges) >= 2:
                     new_weight = total_weight + edge.weight
                     if new_weight < 0:
@@ -124,8 +141,12 @@ class CurrencyGraph:
                 path_edges.pop()
                 path_assets.pop()
                 visited.discard(edge.dst)
+                if truncated:
+                    return
 
         dfs(start_asset, 0.0)
+        if truncated:
+            logger.debug("find_cycles(%s) hit max_expansions=%d, results may be incomplete", start_asset, max_expansions)
         results.sort(key=lambda c: c.total_weight)
         return results
 
