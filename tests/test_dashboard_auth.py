@@ -104,3 +104,50 @@ def test_websocket_with_credentials_connects(tmp_path):
     with client.websocket_connect("/ws", headers=_basic_auth_header("admin", "secret")) as ws:
         msg = ws.receive_json()
         assert msg["type"] == "state"
+
+
+def test_ws_ticket_endpoint_requires_auth_like_any_other_route(tmp_path):
+    client = make_client(tmp_path, auth_username="admin", auth_password="secret")
+
+    resp = client.get("/api/ws_ticket")
+
+    assert resp.status_code == 401
+
+
+def test_ws_ticket_lets_websocket_connect_with_no_authorization_header(tmp_path):
+    """The iPad Safari case: fetch() carries cached Basic Auth reliably,
+    but the browser's raw WebSocket handshake doesn't -- a ticket fetched
+    over a normal authenticated request should let /ws connect anyway."""
+    client = make_client(tmp_path, auth_username="admin", auth_password="secret")
+
+    ticket = client.get("/api/ws_ticket", headers=_basic_auth_header("admin", "secret")).json()["ticket"]
+
+    with client.websocket_connect(f"/ws?ticket={ticket}") as ws:
+        msg = ws.receive_json()
+        assert msg["type"] == "state"
+
+
+def test_ws_ticket_is_single_use(tmp_path):
+    client = make_client(tmp_path, auth_username="admin", auth_password="secret")
+    ticket = client.get("/api/ws_ticket", headers=_basic_auth_header("admin", "secret")).json()["ticket"]
+
+    with client.websocket_connect(f"/ws?ticket={ticket}"):
+        pass  # first use succeeds and consumes the ticket
+
+    try:
+        with client.websocket_connect(f"/ws?ticket={ticket}"):
+            raised = False
+    except WebSocketDisconnect:
+        raised = True
+    assert raised
+
+
+def test_ws_ticket_without_auth_configured_is_harmless(tmp_path):
+    client = make_client(tmp_path)  # no auth configured at all
+
+    resp = client.get("/api/ws_ticket")
+    assert resp.status_code == 200
+
+    with client.websocket_connect("/ws") as ws:  # unticketed connection still works
+        msg = ws.receive_json()
+        assert msg["type"] == "state"

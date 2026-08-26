@@ -516,9 +516,8 @@ footer{ border-top:1px solid var(--border); padding:16px 20px; font-size:11.5px;
 
   /* ---------------- websocket ---------------- */
   var ws = null, reconnectDelay = 1000;
-  function connectWs(){
-    var proto = location.protocol === "https:" ? "wss:" : "ws:";
-    ws = new WebSocket(proto + "//" + location.host + "/ws");
+  function openSocket(url){
+    ws = new WebSocket(url);
     ws.addEventListener("open", function(){
       reconnectDelay = 1000;
       $("#connBadge").textContent = "live"; $("#connBadge").className = "conn-badge live";
@@ -537,6 +536,19 @@ footer{ border-top:1px solid var(--border); padding:16px 20px; font-size:11.5px;
         if(msg.data.opportunities && msg.data.opportunities.length) renderFeedEntries(msg.data.opportunities, true);
       }
     });
+  }
+  function connectWs(){
+    var proto = location.protocol === "https:" ? "wss:" : "ws:";
+    var base = proto + "//" + location.host + "/ws";
+    // Some browsers (observed on iPad Safari) don't resend cached HTTP
+    // Basic Auth credentials on a raw WebSocket handshake even though
+    // fetch() reliably does -- fetch a one-time ticket over a normal
+    // request first and pass it as a query param instead of relying on
+    // the browser to carry the Authorization header over. If auth isn't
+    // configured server-side this ticket is unused but harmless.
+    api("/api/ws_ticket").then(function(data){
+      openSocket(base + (data && data.ticket ? "?ticket=" + encodeURIComponent(data.ticket) : ""));
+    }).catch(function(){ openSocket(base); });
   }
 
   /* ---------------- init ---------------- */

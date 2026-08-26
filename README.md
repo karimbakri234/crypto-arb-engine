@@ -52,6 +52,8 @@ It binds to localhost only (`DASHBOARD_HOST=127.0.0.1`) and is meant to be viewe
 
 **If you do change `DASHBOARD_HOST` (e.g. to `0.0.0.0` on a cloud VPS so you can reach it from your own browser), you must also set `DASHBOARD_USERNAME` and `DASHBOARD_PASSWORD` in `.env`.** With both set, every route — the API, the websocket, and the static frontend — requires HTTP Basic Auth (`dashboard/auth.py`); your browser will show a normal login prompt. Leaving `DASHBOARD_HOST` non-local without these set logs a `CRITICAL` warning on startup, because the dashboard is otherwise reachable, unauthenticated, by anyone who finds the IP and port. Note that this is plain HTTP, not HTTPS: Basic Auth stops casual/opportunistic access (port scanners, a leaked IP), but the credentials themselves aren't encrypted in transit — don't reuse a password you care about elsewhere, and if you want protection against someone actively monitoring the network path to your server, put this behind an SSH tunnel or a TLS-terminating reverse proxy instead of trusting Basic Auth alone.
 
+Some browsers (observed on iPad Safari) reliably resend cached Basic Auth credentials on every `fetch()` call but not on the raw WebSocket handshake `/ws` uses — the page would load correctly with real data but the live-updates connection badge would stay permanently "disconnected". `dashboard/auth.py`'s `WsTicketStore` works around this: the page first fetches a short-lived, single-use ticket over a normal (reliably authenticated) request (`GET /api/ws_ticket`), then connects to `/ws?ticket=...` instead of depending on the browser to carry the Authorization header over. This is transparent — nothing to configure — and falls back gracefully if the ticket fetch itself fails.
+
 ## Project structure
 
 ```
@@ -193,7 +195,7 @@ Read this section in full before ever setting `ARB_MODE=live`.
 ## Testing
 
 ```bash
-pytest         # 126 tests: core (incl. the O(1) BookStore symbol index + MarketState matrix cache), all 15 strategies, execution/risk (incl. the pre-execution profitability re-check), dashboard API + Basic Auth + venue credentials, config venue-id validation, hypothesis property tests -- no live network calls
+pytest         # 130 tests: core (incl. the O(1) BookStore symbol index + MarketState matrix cache), all 15 strategies, execution/risk (incl. the pre-execution profitability re-check), dashboard API + Basic Auth + the /ws ticket fallback + venue credentials, config venue-id validation, hypothesis property tests -- no live network calls
 ruff check .   # clean
 python -m benchmarks.bench_detection
 ```

@@ -28,7 +28,7 @@ from config.venues import CEX_VENUES
 from core.book import BookStore
 from core.control import VALID_MODES, ControlState
 from core.rest_manager import RestManager
-from dashboard.auth import BasicAuthMiddleware
+from dashboard.auth import BasicAuthMiddleware, WsTicketStore
 from dashboard.credentials import write_credentials
 from dashboard.state import Broadcaster, build_snapshot
 from risk.manager import RiskManager
@@ -83,7 +83,7 @@ def create_app(
     broadcaster: Broadcaster,
     auth_username: str | None = None,
     auth_password: str | None = None,
-) -> FastAPI:
+):
     """Build the dashboard FastAPI app bound to one running engine's live state.
 
     When `auth_username`/`auth_password` are both set, every route --
@@ -93,8 +93,7 @@ def create_app(
     beyond localhost should always set these.
     """
     app = FastAPI(title="crypto-arb-engine dashboard")
-    if auth_username and auth_password:
-        app.add_middleware(BasicAuthMiddleware, username=auth_username, password=auth_password)
+    ticket_store = WsTicketStore()
     strategy_by_name = {s.name: s for s in strategies}
     for s in strategies:
         control.strategy_enabled.setdefault(s.name, True)
@@ -105,6 +104,17 @@ def create_app(
     @app.get("/api/state")
     def get_state() -> dict:
         return snapshot()
+
+    @app.get("/api/ws_ticket")
+    def get_ws_ticket() -> dict:
+        """A short-lived ticket the frontend swaps for `/ws` access.
+
+        See `dashboard.auth.WsTicketStore` for why: some browsers don't
+        reliably resend cached HTTP Basic Auth credentials on a raw
+        WebSocket handshake, so the page fetches this over a normal
+        (reliably authenticated) request first instead.
+        """
+        return {"ticket": ticket_store.issue()}
 
     @app.get("/api/opportunities")
     def get_opportunities(limit: int = 50) -> list[dict]:
@@ -239,4 +249,12 @@ def create_app(
             broadcaster.unregister(websocket)
 
     app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")
+
+    if auth_username and auth_password:
+        # Wraps the fully-built app rather than app.add_middleware(...) so
+        # this function can hand the same ticket_store instance the
+        # /api/ws_ticket route above already issues from -- add_middleware
+        # only stores a (class, kwargs) pair and builds the instance
+        # later, with no way to get a handle back on it.
+        return BasicAuthMiddleware(app, auth_username, auth_password, ticket_store=ticket_store)
     return app
