@@ -80,7 +80,10 @@ def build_strategies() -> list[Strategy]:
     """
     return [
         CrossExchangeStrategy(min_profit_pct=TIER_CONFIG["tier1"].min_profit_pct, max_trade_usd=MAX_TRADE_USD),
-        CexDexStrategy(max_trade_usd=MAX_TRADE_USD),
+        # CexDexStrategy and DexDexStrategy size trades via `probe_size_base`
+        # (a fixed base-asset amount), not a USD cap -- they don't take
+        # max_trade_usd, unlike every other strategy here.
+        CexDexStrategy(),
         DexDexStrategy(),
         FundingRateStrategy(max_trade_usd=MAX_TRADE_USD),
         BasisCarryStrategy(max_trade_usd=MAX_TRADE_USD),
