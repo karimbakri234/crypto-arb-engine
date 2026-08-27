@@ -71,8 +71,8 @@ logger = logging.getLogger(__name__)
 
 MIN_CONNECTED_VENUES = 2
 
-# Paper-mode starting balance per venue, in USD, split evenly between each
-# symbol's base and quote asset.
+# Paper-mode starting capital, in USD, TOTAL across every connected venue --
+# not per venue. Simulate the money you would actually deposit.
 #
 # This used to be a flat 1,000,000 *units* of every asset on every venue --
 # ~$200M of SOL on a single venue. The effect was that `Router.select`'s
@@ -84,7 +84,13 @@ MIN_CONNECTED_VENUES = 2
 # A realistic figure makes paper mode answer the question that actually
 # matters: does this still make money when the same euros have to be in
 # the right place at the right time?
-PAPER_SEED_USD_PER_VENUE: float = float(os.getenv("PAPER_SEED_USD_PER_VENUE", "2000"))
+PAPER_SEED_USD_TOTAL: float = float(os.getenv("PAPER_SEED_USD_TOTAL", "1000"))
+
+# Fund only the first N connected venues instead of all of them. Spreading a
+# small book across every venue leaves each position under the exchanges'
+# minimum order sizes, so nothing can trade; a real operator with limited
+# capital concentrates it instead. 0 or unset means fund everything.
+PAPER_SEED_MAX_VENUES: int = int(os.getenv("PAPER_SEED_MAX_VENUES", "0"))
 
 
 def build_strategies() -> list[Strategy]:
@@ -162,32 +168,93 @@ def _usd_price_of(asset: str, book_store: BookStore) -> float | None:
     return None
 
 
+def _plan_paper_allocation(symbol_list: list[str], venue_usd: float) -> dict[str, float]:
+    """Split one venue's USD across the assets it needs to hold.
+
+    Half into quote assets, half into base assets, because a cross-venue
+    trade needs both: you buy with the quote on one venue and deliver the
+    base on the other. Holding only one side means half the routes cannot
+    fund even with the full balance sitting there.
+
+    The quote half is weighted by how many polled symbols actually use
+    each quote, so a universe that is mostly USDT pairs puts most of the
+    money in USDT rather than stranding it in a quote appearing once.
+    Bases split evenly -- there is no comparable signal between them at
+    seed time, before any opportunity has been seen.
+    """
+    bases: set[str] = set()
+    quote_weights: dict[str, int] = {}
+    for symbol in symbol_list:
+        base, quote = symbol.split("/")
+        bases.add(base)
+        quote_weights[quote] = quote_weights.get(quote, 0) + 1
+
+    allocation: dict[str, float] = {}
+    total_weight = sum(quote_weights.values())
+    if total_weight:
+        for quote, weight in quote_weights.items():
+            allocation[quote] = (venue_usd / 2.0) * (weight / total_weight)
+    if bases:
+        per_base = (venue_usd / 2.0) / len(bases)
+        for base in bases:
+            allocation[base] = allocation.get(base, 0.0) + per_base
+    return allocation
+
+
 def _seed_paper_inventory(
     connected: list[str],
     symbol_list: list[str],
     inventory: InventoryManager,
     book_store: BookStore,
 ) -> None:
-    """Give each venue `PAPER_SEED_USD_PER_VENUE` spread over the assets it trades.
+    """Spread `PAPER_SEED_USD_TOTAL` across every connected venue.
 
     Sized in USD and converted to units at the live mid, rather than a
     flat unit count per asset -- 1,000,000 units means $1M of USDT and
     $200M of SOL, which is not a portfolio anyone has and quietly removes
     every capital constraint from the simulation.
+
+    The total is deliberately a *total*, not a per-venue figure: the
+    question worth simulating is "does $X of my money make anything",
+    and $X divided across seventeen venues and twenty-odd assets is a
+    much smaller number per position than it first looks. That arithmetic
+    is the finding, so this logs it rather than hiding it.
     """
-    for venue_id in connected:
-        assets = {a for symbol in symbol_list for a in symbol.split("/")}
-        priced = {a: p for a in assets if (p := _usd_price_of(a, book_store)) is not None}
-        if not priced:
-            continue
-        usd_each = PAPER_SEED_USD_PER_VENUE / len(priced)
-        for asset, price in priced.items():
-            inventory.set_balance(venue_id, asset, usd_each / price)
+    venues = connected[:PAPER_SEED_MAX_VENUES] if PAPER_SEED_MAX_VENUES else connected
+    if not venues:
+        return
+
+    venue_usd = PAPER_SEED_USD_TOTAL / len(venues)
+    allocation = _plan_paper_allocation(symbol_list, venue_usd)
+
+    seeded_assets = 0
+    for venue_id in venues:
+        for asset, usd in allocation.items():
+            price = _usd_price_of(asset, book_store)
+            if price is None or price <= 0:
+                continue
+            inventory.set_balance(venue_id, asset, usd / price)
+            seeded_assets += 1
 
     logger.info(
-        "Seeded paper inventory: $%.0f per venue across %d venues (override with PAPER_SEED_USD_PER_VENUE)",
-        PAPER_SEED_USD_PER_VENUE, len(connected),
+        "Seeded paper inventory: $%.0f total across %d venues = $%.2f per venue, %d positions "
+        "(override with PAPER_SEED_USD_TOTAL / PAPER_SEED_MAX_VENUES)",
+        PAPER_SEED_USD_TOTAL, len(venues), venue_usd, seeded_assets,
     )
+
+    # The largest single position is the ceiling on any one leg. If that
+    # is under the venue minimums the engine already enforces, the run
+    # will report zero trades -- which is a true answer about this much
+    # capital, but an expensive one to wait several hours to discover.
+    largest = max(allocation.values(), default=0.0)
+    typical_minimum = min_order_usd_for(venues[0])
+    if largest < typical_minimum:
+        logger.warning(
+            "Paper capital is below tradeable size: largest position is $%.2f but %s's minimum order "
+            "is $%.2f. Expect zero trades. Raise PAPER_SEED_USD_TOTAL, or concentrate the same money "
+            "with PAPER_SEED_MAX_VENUES=4 to simulate a realistic small book.",
+            largest, venues[0], typical_minimum,
+        )
 
 
 async def _seed_inventory_for_mode(

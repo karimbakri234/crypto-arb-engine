@@ -29,7 +29,7 @@ cp .env.example .env   # then fill in real API keys / RPC URLs
 - RPC endpoints per chain: `ETH_RPC_URL`, `ARBITRUM_RPC_URL`, `BASE_RPC_URL`, `POLYGON_RPC_URL`, `BSC_RPC_URL`, `SOLANA_RPC_URL`.
 - Aggregator API keys (optional): `ONEINCH_API_KEY`, `ZEROX_API_KEY`, `JUPITER_API_KEY`, `ODOS_API_KEY`.
 - Risk overrides: `MAX_TRADE_USD`, `DAILY_LOSS_LIMIT_USD`, `MAX_TRADES_PER_DAY`, `MAX_CONSECUTIVE_FAILURES`.
-- Paper capital: `PAPER_SEED_USD_PER_VENUE` (default `2000`) — the synthetic balance each venue starts with in `paper` mode, in USD, converted to units at the live mid and split across the assets that venue trades. See [Paper mode models finite capital](#paper-mode-models-finite-capital).
+- Paper capital: `PAPER_SEED_USD_TOTAL` (default `1000`) — starting capital in `paper` mode, in USD, **total across all venues, not per venue**; converted to units at the live mid. `PAPER_SEED_MAX_VENUES` (default `0` = all) funds only the first N venues, concentrating a small book instead of stranding every position below the exchanges' minimum order sizes. See [Paper mode models finite capital](#paper-mode-models-finite-capital).
 - Dashboard: `DASHBOARD_ENABLED` (default `true`), `DASHBOARD_HOST` (default `127.0.0.1`), `DASHBOARD_PORT` (default `8420`), `DASHBOARD_USERNAME`/`DASHBOARD_PASSWORD` (required together if `DASHBOARD_HOST` is not local) — see [Local dashboard](#local-dashboard).
 
 All credentials load via `python-dotenv` from a local `.env`. Nothing is hardcoded.
@@ -212,7 +212,18 @@ Paper mode is only useful if it can report a loss. Three things had to be fixed 
 
 **1. One trade, counted twice.** `latency_arb` computes exactly the same net edge as `cross_exchange` — same formula, same inputs — and adds a single extra condition (the buy venue's book being staler than the sell venue's). Every latency_arb hit is therefore *by construction* also a cross_exchange hit; they cannot disagree. Undeduplicated, one real trade produced two feed entries, two decay-curve samples, and twice its PnL. `main.route_key` now collapses opportunities by the physical trade they describe — `(venue, symbol, side)` per leg — keeping the best edge and counting the rest as `duplicate_route` rejections.
 
-**2. Unlimited capital.** Paper mode seeded `1_000_000` *units* of every asset on every venue — roughly $200M of SOL on a single exchange. `Router.select`'s inventory check, the thing that stops two strategies spending the same balance, could therefore never fail. Now seeded in USD (`PAPER_SEED_USD_PER_VENUE`, default $2000/venue) and converted at the live mid.
+**2. Unlimited capital.** Paper mode seeded `1_000_000` *units* of every asset on every venue — roughly $200M of SOL on a single exchange. `Router.select`'s inventory check, the thing that stops two strategies spending the same balance, could therefore never fail. Now seeded in USD (`PAPER_SEED_USD_TOTAL`, default $1000) and converted at the live mid.
+
+That total is a **total**, not a per-venue figure, and the division is the point. Within a venue the money splits half into quote assets (weighted by how many polled symbols use each quote) and half into bases, because a cross-venue trade spends quote on one side and delivers base on the other — an all-stablecoin book cannot fund the sell leg at all. What $1,000 actually buys, over a 24-symbol / 16-asset universe:
+
+| Venues funded | Per venue | Largest single position |
+|---|---|---|
+| 17 (all) | $58.82 | **$17.16** USDT |
+| 6 | $166.67 | $48.61 |
+| 4 | $250.00 | $72.92 |
+| 2 | $500.00 | $145.83 |
+
+Venue minimums run $10–25 per order. Spread across all 17 venues, a $1,000 book's largest position clears Kraken's $10 minimum but not Bitstamp's $25 — so most routes simply cannot fund, and the engine logs a warning saying so at startup rather than leaving you to infer it from an empty dashboard hours later. `PAPER_SEED_MAX_VENUES=4` is how you simulate what a real operator with limited capital would actually do: concentrate it.
 
 **3. Fills that consumed nothing.** `InventoryManager.settle()` existed and was called from nowhere; reservations were locked at selection and never resolved either way. So balances never depleted and never recovered. `Router.settle_fill` now moves balance the way a fill does — a buy spends the venue's quote and credits its base, a sell the reverse — and `Router.release_unfilled` returns the lock when the executor rejects a trade.
 
@@ -303,7 +314,7 @@ Read this section in full before ever setting `ARB_MODE=live`.
 ## Testing
 
 ```bash
-pytest         # 192 tests: core (O(1) BookStore symbol index, MarketState matrix cache, bounded cycle search), all 15 strategies, execution/risk (pre-execution profitability re-check, venue minimum order sizes, deployed-capital release), analytics (bounded in-memory history, decay re-pricing), connect-time market pruning + live fee capture, tier-aware poll scheduling + concurrency cap, symbol-budget selection, dashboard API + Basic Auth + /ws ticket fallback + venue credentials, config venue-id validation, systemd unit rendering, cross-strategy route dedup, inventory settlement, hypothesis property tests -- no live network calls
+pytest         # 198 tests: core (O(1) BookStore symbol index, MarketState matrix cache, bounded cycle search), all 15 strategies, execution/risk (pre-execution profitability re-check, venue minimum order sizes, deployed-capital release), analytics (bounded in-memory history, decay re-pricing), connect-time market pruning + live fee capture, tier-aware poll scheduling + concurrency cap, symbol-budget selection, dashboard API + Basic Auth + /ws ticket fallback + venue credentials, config venue-id validation, systemd unit rendering, cross-strategy route dedup, inventory settlement, USD-total paper capital, hypothesis property tests -- no live network calls
 ruff check .   # clean
 python -m benchmarks.bench_detection
 ```
