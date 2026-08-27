@@ -248,6 +248,14 @@ It fetches every venue in a single `asyncio.gather` — one instant, no schedule
 | Edge survives, one venue's timestamps consistently seconds old | That venue publishes stale books. The price is real in the sense that they published it; it is not one you can trade against. |
 | Venues report different market types | A perp quoted against a spot book. Perpetuals trade at a premium or discount to spot as a matter of course — funding rates exist to manage precisely that gap. This is the basis, not a riskless spread. |
 
+When an edge survives all of those checks, one explanation is still left, and `tools/transfer_status.py` tests it:
+
+```bash
+python -m tools.transfer_status --asset SOL
+```
+
+A 0.5% spread between top-20 exchanges is taken in milliseconds by people whose whole job is taking it. One that survives a full minute is not being missed — it is being *declined*. The usual reason is that the cheap venue's deposits or withdrawals for that asset are suspended: a wallet under maintenance, a paused chain, a network upgrade. The asset strands on that exchange, its local price decouples from the global one, and the gap persists for days precisely because nobody can arbitrage it away. `withdraw=NO` on the cheap side means the "opportunity" is a one-way door — you buy the discount and you keep it. The same tool prints per-network withdrawal fees, which is the number that decides whether a one-directional edge is worth anything even when withdrawals are open.
+
 ## Profitability instrumentation
 
 Detection numbers alone tell you nothing about whether this is profitable — a spread the code "finds" that's gone by the time you can act on it isn't a spread you captured. `analytics/recorder.py` is built to answer that directly instead of assuming it:
