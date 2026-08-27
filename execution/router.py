@@ -37,8 +37,9 @@ def _leg_asset(symbol: str, side: str) -> str:
 class Router:
     """Selects and reserves inventory for the highest-expected-value opportunities."""
 
-    def __init__(self, inventory: InventoryManager) -> None:
+    def __init__(self, inventory: InventoryManager, metrics=None) -> None:
         self.inventory = inventory
+        self.metrics = metrics
 
     def select(self, opportunities: list[Opportunity]) -> list[Opportunity]:
         """Return the subset of `opportunities` that got their inventory reserved.
@@ -80,6 +81,14 @@ class Router:
             else:
                 for venue_id, asset, notional in reserved:
                     self.inventory.release(venue_id, asset, notional)
+                # Counted, not just logged. This is the last filter between a
+                # detected opportunity and a trade, and it was the only one
+                # that recorded nothing -- so a run could show a full feed,
+                # zero trades, and a "why no trades" panel that explained
+                # none of it. An opportunity on a venue the operator holds no
+                # balance on dies exactly here, silently.
+                if self.metrics is not None:
+                    self.metrics.record_rejection("no_balance_on_venue")
                 logger.debug("Skipped %s: could not reserve inventory for all legs", opportunity)
 
         return accepted

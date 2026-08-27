@@ -338,7 +338,7 @@ Read this section in full before ever setting `ARB_MODE=live`.
 ## Testing
 
 ```bash
-pytest         # 205 tests: core (O(1) BookStore symbol index, MarketState matrix cache, bounded cycle search), all 15 strategies, execution/risk (pre-execution profitability re-check, venue minimum order sizes, deployed-capital release), analytics (bounded in-memory history, decay re-pricing), connect-time market pruning + live fee capture, tier-aware poll scheduling + concurrency cap, symbol-budget selection, dashboard API + Basic Auth + /ws ticket fallback + venue credentials, config venue-id validation, systemd unit rendering, cross-strategy route dedup, inventory settlement, USD-total paper capital, suspended-transfer routes, hypothesis property tests -- no live network calls
+pytest         # 207 tests: core (O(1) BookStore symbol index, MarketState matrix cache, bounded cycle search), all 15 strategies, execution/risk (pre-execution profitability re-check, venue minimum order sizes, deployed-capital release), analytics (bounded in-memory history, decay re-pricing), connect-time market pruning + live fee capture, tier-aware poll scheduling + concurrency cap, symbol-budget selection, dashboard API + Basic Auth + /ws ticket fallback + venue credentials, config venue-id validation, systemd unit rendering, cross-strategy route dedup, inventory settlement, USD-total paper capital, suspended-transfer routes, hypothesis property tests -- no live network calls
 ruff check .   # clean
 python -m benchmarks.bench_detection
 ```

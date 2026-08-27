@@ -68,6 +68,7 @@ def test_concentrating_the_book_raises_the_per_position_size(monkeypatch):
     """Same money, fewer venues, bigger positions -- the knob that makes a
     small book tradeable instead of stranded below venue minimums."""
     monkeypatch.setattr(main, "PAPER_SEED_USD_TOTAL", 1000.0)
+    monkeypatch.setattr(main, "PAPER_SEED_VENUES", [])
     store = _book_store()
     venues = ["kraken", "gemini", "bitstamp", "kucoin"]
 
@@ -79,11 +80,52 @@ def test_concentrating_the_book_raises_the_per_position_size(monkeypatch):
     concentrated = InventoryManager()
     _seed_paper_inventory(venues, SYMBOLS, concentrated, store)
 
-    assert concentrated.get_balance("kraken", "USDT").free == pytest.approx(
-        2 * spread.get_balance("kraken", "USDT").free
+    funded = [v for v in venues if concentrated.get_balance(v, "USDT").free > 0]
+    assert len(funded) == 2
+    # Same total, half as many venues, so twice the position on each.
+    assert concentrated.get_balance(funded[0], "USDT").free == pytest.approx(
+        2 * spread.get_balance(funded[0], "USDT").free
     )
-    assert concentrated.get_balance("bitstamp", "USDT").free == 0.0
     assert _total_usd(concentrated, store) == pytest.approx(1000.0)
+
+
+def test_capital_goes_to_the_venues_that_quote_the_most_symbols(monkeypatch):
+    """Which venues get funded matters as much as how many. Connection
+    order correlates with nothing: a live run funded four venues while
+    every opportunity in the feed was on four different ones, so the
+    engine detected a dozen routes and could fund none of them."""
+    monkeypatch.setattr(main, "PAPER_SEED_USD_TOTAL", 1000.0)
+    monkeypatch.setattr(main, "PAPER_SEED_MAX_VENUES", 2)
+    monkeypatch.setattr(main, "PAPER_SEED_VENUES", [])
+
+    store = BookStore()
+    # "busy" and "alsobusy" quote everything; "quiet" quotes one symbol.
+    for symbol in SYMBOLS:
+        for venue in ("busy", "alsobusy"):
+            store.get_or_create(venue, symbol).replace(bids=[(100.0, 5.0)], asks=[(100.1, 5.0)])
+    store.get_or_create("quiet", "BTC/USDT").replace(bids=[(100.0, 5.0)], asks=[(100.1, 5.0)])
+
+    inventory = InventoryManager()
+    # "quiet" is listed first -- under the old first-N rule it would win.
+    _seed_paper_inventory(["quiet", "busy", "alsobusy"], SYMBOLS, inventory, store)
+
+    assert inventory.get_balance("quiet", "USDT").free == 0.0
+    assert inventory.get_balance("busy", "USDT").free > 0.0
+    assert inventory.get_balance("alsobusy", "USDT").free > 0.0
+
+
+def test_an_explicit_venue_list_wins(monkeypatch):
+    """When you already know which venues you intend to fund for real,
+    say so rather than hoping the ranking agrees."""
+    monkeypatch.setattr(main, "PAPER_SEED_USD_TOTAL", 1000.0)
+    monkeypatch.setattr(main, "PAPER_SEED_MAX_VENUES", 2)
+    monkeypatch.setattr(main, "PAPER_SEED_VENUES", ["bitstamp"])
+    inventory = InventoryManager()
+
+    _seed_paper_inventory(["kraken", "gemini", "bitstamp"], SYMBOLS, inventory, _book_store())
+
+    assert inventory.get_balance("bitstamp", "USDT").free > 0.0
+    assert inventory.get_balance("kraken", "USDT").free == 0.0
 
 
 def test_capital_is_split_between_quote_and_base_assets():

@@ -93,11 +93,26 @@ MIN_CONNECTED_VENUES = 2
 # the right place at the right time?
 PAPER_SEED_USD_TOTAL: float = float(os.getenv("PAPER_SEED_USD_TOTAL", "1000"))
 
-# Fund only the first N connected venues instead of all of them. Spreading a
-# small book across every venue leaves each position under the exchanges'
-# minimum order sizes, so nothing can trade; a real operator with limited
-# capital concentrates it instead. 0 or unset means fund everything.
+# Fund only N venues instead of all of them. Spreading a small book across
+# every venue leaves each position under the exchanges' minimum order sizes,
+# so nothing can trade; a real operator with limited capital concentrates it
+# instead. 0 or unset means fund everything.
+#
+# *Which* N matters as much as how many. This originally took the first N in
+# connection order, which is arbitrary -- a live run funded 4 venues while
+# every opportunity in the feed was on htx, bingx, mexc and bitstamp, none of
+# them funded. The engine detected a dozen routes and traded none, because
+# the money was on venues nothing was happening on. Venues are now ranked by
+# how many of the polled symbols they actually list, so capital lands where
+# trades can occur.
 PAPER_SEED_MAX_VENUES: int = int(os.getenv("PAPER_SEED_MAX_VENUES", "0"))
+
+# Explicit venue list for paper seeding, e.g. "htx,bingx,mexc,bitstamp".
+# Overrides the ranking above when you already know which venues you intend
+# to fund for real. Empty means rank automatically.
+PAPER_SEED_VENUES: list[str] = [
+    v.strip() for v in os.getenv("PAPER_SEED_VENUES", "").split(",") if v.strip()
+]
 
 
 def build_strategies() -> list[Strategy]:
@@ -236,6 +251,52 @@ async def _await_first_books(
     return populated
 
 
+def _venues_to_fund(
+    connected: list[str],
+    book_store: BookStore,
+    symbol_list: list[str],
+) -> list[str]:
+    """Choose which venues get paper capital.
+
+    An explicit `PAPER_SEED_VENUES` wins. Otherwise, when the book is
+    concentrated onto fewer venues than are connected, rank by how many of
+    the polled symbols each venue actually quotes -- a venue carrying two
+    of the twenty-four symbols can host almost no route, so funding it
+    strands that share of the capital.
+
+    Taking the first N in connection order (the previous behaviour) is
+    worse than arbitrary: connection order correlates with nothing, and a
+    live run funded four venues while every opportunity in the feed sat on
+    four different ones. Twelve routes detected, none tradeable, and the
+    only trace was a debug line.
+    """
+    if PAPER_SEED_VENUES:
+        chosen = [v for v in PAPER_SEED_VENUES if v in connected]
+        missing = [v for v in PAPER_SEED_VENUES if v not in connected]
+        if missing:
+            logger.warning("PAPER_SEED_VENUES names venues that are not connected: %s", ", ".join(missing))
+        return chosen or connected
+
+    if not PAPER_SEED_MAX_VENUES or len(connected) <= PAPER_SEED_MAX_VENUES:
+        return connected
+
+    def coverage(venue_id: str) -> int:
+        return sum(
+            1
+            for symbol in symbol_list
+            if any(book.venue_id == venue_id for book in book_store.all_for_symbol(symbol))
+        )
+
+    ranked = sorted(connected, key=lambda v: (-coverage(v), v))
+    chosen = ranked[:PAPER_SEED_MAX_VENUES]
+    logger.info(
+        "Funding %d of %d venues by symbol coverage: %s",
+        len(chosen), len(connected),
+        ", ".join(f"{v}({coverage(v)})" for v in chosen),
+    )
+    return chosen
+
+
 def _seed_paper_inventory(
     connected: list[str],
     symbol_list: list[str],
@@ -255,7 +316,7 @@ def _seed_paper_inventory(
     much smaller number per position than it first looks. That arithmetic
     is the finding, so this logs it rather than hiding it.
     """
-    venues = connected[:PAPER_SEED_MAX_VENUES] if PAPER_SEED_MAX_VENUES else connected
+    venues = _venues_to_fund(connected, book_store, symbol_list)
     if not venues:
         return
 
@@ -501,7 +562,7 @@ async def run() -> None:
     risk_manager = RiskManager()
     reconciler = Reconciler()
     inventory = InventoryManager()
-    router = Router(inventory)
+    router = Router(inventory, metrics=metrics)
     control = ControlState(mode=MODE)
     broadcaster = Broadcaster()
     stop_event = asyncio.Event()
