@@ -248,7 +248,16 @@ It fetches every venue in a single `asyncio.gather` — one instant, no schedule
 | Edge survives, one venue's timestamps consistently seconds old | That venue publishes stale books. The price is real in the sense that they published it; it is not one you can trade against. |
 | Venues report different market types | A perp quoted against a spot book. Perpetuals trade at a premium or discount to spot as a matter of course — funding rates exist to manage precisely that gap. This is the basis, not a riskless spread. |
 
-When an edge survives all of those checks, one explanation is still left, and `tools/transfer_status.py` tests it:
+When an edge survives all of those checks, one explanation is still left, and `tools/transfer_status.py` tests it. **It found one:**
+
+```
+SOL deposit/withdrawal status
+htx      active=yes  deposit=yes  withdraw=NO   fee=0.001 SOL   <-- CANNOT WITHDRAW
+bitget   active=yes  deposit=yes  withdraw=yes  fee=0.006 SOL
+```
+
+htx had SOL withdrawals suspended while quoting SOL/USDT ~0.5% under bitget, mexc and bingx. That is the entire explanation for an "arbitrage" the engine reported all day. The engine now captures deposit/withdraw flags at connect time (`RestManager._capture_transfer_status`) and skips cross-venue routes that cannot be rebalanced (`main.is_rebalanceable`), counting them as `asset_cannot_be_transferred` rejections. Same-venue routes need no transfer and are never affected.
+
 
 ```bash
 python -m tools.transfer_status --asset SOL
@@ -322,7 +331,7 @@ Read this section in full before ever setting `ARB_MODE=live`.
 ## Testing
 
 ```bash
-pytest         # 198 tests: core (O(1) BookStore symbol index, MarketState matrix cache, bounded cycle search), all 15 strategies, execution/risk (pre-execution profitability re-check, venue minimum order sizes, deployed-capital release), analytics (bounded in-memory history, decay re-pricing), connect-time market pruning + live fee capture, tier-aware poll scheduling + concurrency cap, symbol-budget selection, dashboard API + Basic Auth + /ws ticket fallback + venue credentials, config venue-id validation, systemd unit rendering, cross-strategy route dedup, inventory settlement, USD-total paper capital, hypothesis property tests -- no live network calls
+pytest         # 203 tests: core (O(1) BookStore symbol index, MarketState matrix cache, bounded cycle search), all 15 strategies, execution/risk (pre-execution profitability re-check, venue minimum order sizes, deployed-capital release), analytics (bounded in-memory history, decay re-pricing), connect-time market pruning + live fee capture, tier-aware poll scheduling + concurrency cap, symbol-budget selection, dashboard API + Basic Auth + /ws ticket fallback + venue credentials, config venue-id validation, systemd unit rendering, cross-strategy route dedup, inventory settlement, USD-total paper capital, suspended-transfer routes, hypothesis property tests -- no live network calls
 ruff check .   # clean
 python -m benchmarks.bench_detection
 ```

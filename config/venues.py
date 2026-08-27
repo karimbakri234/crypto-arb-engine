@@ -167,6 +167,71 @@ ALL_DEX_IDS: tuple[str, ...] = tuple(DEX_VENUES.keys())
 _LIVE_TAKER_FEES: dict[tuple[str, str | None], float] = {}
 _LIVE_MAKER_FEES: dict[tuple[str, str | None], float] = {}
 
+# ---------------------------------------------------------------------------
+# Live deposit/withdrawal status, keyed by (venue_id, asset).
+#
+# A cross-venue route is only repeatable if the asset can leave the venue it
+# was bought on and reach the venue it is sold on. When it cannot, that
+# venue's local price decouples from the rest of the market and *stays*
+# decoupled -- the thing that would close the gap is precisely the transfer
+# that is blocked.
+#
+# This is not hypothetical. htx suspended SOL withdrawals while quoting
+# SOL/USDT ~0.5% below bitget, mexc and bingx, and the engine reported that
+# gap as a persistent arbitrage for a full day, 20 rounds out of 20. It was
+# real in the sense that htx published it, and uncapturable: buying there
+# converts USDT into SOL that cannot leave. See `tools/transfer_status.py`.
+#
+# Absent an explicit `False` these stay permissive -- not every venue reports
+# the flags, and refusing to trade on missing metadata is a worse failure
+# than the one being prevented.
+# ---------------------------------------------------------------------------
+
+_WITHDRAW_BLOCKED: set[tuple[str, str]] = set()
+_DEPOSIT_BLOCKED: set[tuple[str, str]] = set()
+
+
+def register_transfer_status(
+    venue_id: str,
+    asset: str,
+    can_withdraw_asset: bool | None,
+    can_deposit_asset: bool | None,
+) -> None:
+    """Record whether `asset` can move in/out of `venue_id`.
+
+    `None` means the venue did not say, which is left permissive.
+    """
+    if can_withdraw_asset is False:
+        _WITHDRAW_BLOCKED.add((venue_id, asset))
+    elif can_withdraw_asset is True:
+        _WITHDRAW_BLOCKED.discard((venue_id, asset))
+
+    if can_deposit_asset is False:
+        _DEPOSIT_BLOCKED.add((venue_id, asset))
+    elif can_deposit_asset is True:
+        _DEPOSIT_BLOCKED.discard((venue_id, asset))
+
+
+def clear_transfer_status() -> None:
+    _WITHDRAW_BLOCKED.clear()
+    _DEPOSIT_BLOCKED.clear()
+
+
+def can_withdraw(venue_id: str, asset: str) -> bool:
+    return (venue_id, asset) not in _WITHDRAW_BLOCKED
+
+
+def can_deposit(venue_id: str, asset: str) -> bool:
+    return (venue_id, asset) not in _DEPOSIT_BLOCKED
+
+
+def blocked_transfers() -> list[tuple[str, str, str]]:
+    """Every known block, as (venue, asset, direction) -- for logging."""
+    return sorted(
+        [(v, a, "withdraw") for v, a in _WITHDRAW_BLOCKED]
+        + [(v, a, "deposit") for v, a in _DEPOSIT_BLOCKED]
+    )
+
 
 def register_live_fees(
     venue_id: str,

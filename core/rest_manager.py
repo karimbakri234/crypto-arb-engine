@@ -39,7 +39,7 @@ from config.settings import (
     get_credentials,
 )
 from config.universe import ALL_BASE_ASSETS, QUOTE_ASSETS, STABLECOINS, tier_of
-from config.venues import CEX_VENUES, register_live_fees
+from config.venues import CEX_VENUES, register_live_fees, register_transfer_status
 from core.book import BookStore
 
 logger = logging.getLogger(__name__)
@@ -102,6 +102,46 @@ def _prune_markets(client: ccxt.Exchange, keep: frozenset[str]) -> tuple[int, in
     client.ids = sorted(kept_ids)
 
     return (len(kept), dropped)
+
+
+async def _capture_transfer_status(venue_id: str, client: ccxt.Exchange) -> int:
+    """Record which assets can currently move in/out of this venue.
+
+    An asset the venue will not let you withdraw makes every cross-venue
+    route that buys it there a one-way trade: you convert cash into
+    something you cannot move. The engine cannot see this from order books
+    -- the price gap it creates looks exactly like an arbitrage, and
+    persists precisely because nobody can close it.
+
+    Best-effort by design. Not every exchange implements
+    `fetch_currencies`, some require credentials for it, and a venue that
+    tells us nothing is treated as unrestricted -- refusing to trade on
+    missing metadata would break more than it fixes. Returns how many
+    suspensions were found.
+    """
+    if not getattr(client, "has", {}).get("fetchCurrencies"):
+        return 0
+    try:
+        async with asyncio.timeout(LOAD_MARKETS_TIMEOUT_SEC):
+            currencies = await client.fetch_currencies()
+    except Exception as exc:  # noqa: BLE001 - never fail a connect over this
+        logger.debug("No transfer status for %s: %s", venue_id, exc)
+        return 0
+
+    blocked = 0
+    for asset, entry in (currencies or {}).items():
+        if not isinstance(entry, dict):
+            continue
+        withdraw, deposit = entry.get("withdraw"), entry.get("deposit")
+        register_transfer_status(venue_id, asset, withdraw, deposit)
+        if withdraw is False or deposit is False:
+            blocked += 1
+            logger.warning(
+                "%s has %s transfers suspended (deposit=%s withdraw=%s) -- cross-venue routes "
+                "buying %s there cannot be rebalanced and will be skipped",
+                venue_id, asset, deposit, withdraw, asset,
+            )
+    return blocked
 
 
 def _capture_live_fees(venue_id: str, client: ccxt.Exchange) -> int:
@@ -239,9 +279,11 @@ class RestManager:
 
         kept, dropped = _prune_markets(client, self._universe)
         per_symbol_fees = _capture_live_fees(venue_id, client)
+        blocked = await _capture_transfer_status(venue_id, client)
         logger.info(
-            "Connected %s: kept %d market(s), dropped %d off-universe, %d live fee rate(s)",
-            venue_id, kept, dropped, per_symbol_fees,
+            "Connected %s: kept %d market(s), dropped %d off-universe, %d live fee rate(s), "
+            "%d asset(s) with transfers suspended",
+            venue_id, kept, dropped, per_symbol_fees, blocked,
         )
         self.clients[venue_id] = client
 

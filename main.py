@@ -41,7 +41,13 @@ from config.settings import (
     TIER_CONFIG,
 )
 from config.universe import build_tradeable_symbols, select_pollable_symbols, tier_of
-from config.venues import ALL_CEX_IDS, min_order_usd_for
+from config.venues import (
+    ALL_CEX_IDS,
+    blocked_transfers,
+    can_deposit,
+    can_withdraw,
+    min_order_usd_for,
+)
 from core.book import BookStore
 from core.control import ControlState
 from core.feed_manager import FeedManager
@@ -312,6 +318,41 @@ def is_fillable(opportunity: Opportunity) -> bool:
     return opportunity.max_size_usd >= required
 
 
+def is_rebalanceable(opportunity: Opportunity) -> bool:
+    """Whether a cross-venue route's asset can actually be moved back.
+
+    Buying BASE on venue A and selling it on venue B leaves A short cash
+    and long BASE, and B the reverse. Running it a second time requires
+    moving BASE from A back to B. So A must be able to *withdraw* BASE and
+    B must be able to *receive* it. If A cannot release the asset, the
+    route is a one-way door: it converts cash into something that cannot
+    leave, and the "spread" is the market pricing in exactly that.
+
+    This is what htx's SOL looked like -- withdrawals suspended, price
+    ~0.5% under three other venues, and the gap surviving 20 of 20
+    simultaneous samples because the transfer that would close it was
+    blocked. Order books cannot show this; only the venue's own currency
+    metadata can (`RestManager._capture_transfer_status`).
+
+    Same-venue routes (triangular, cross_quote) need no transfer and are
+    never rejected here.
+    """
+    buy_venues = {leg.venue_id for leg in opportunity.legs if leg.side == "buy"}
+    sell_venues = {leg.venue_id for leg in opportunity.legs if leg.side == "sell"}
+    if not buy_venues or buy_venues == sell_venues:
+        return True
+
+    for leg in opportunity.legs:
+        if leg.side not in ("buy", "sell") or "/" not in leg.symbol:
+            continue
+        base = leg.symbol.split("/", 1)[0]
+        if leg.side == "buy" and not can_withdraw(leg.venue_id, base):
+            return False
+        if leg.side == "sell" and not can_deposit(leg.venue_id, base):
+            return False
+    return True
+
+
 def route_key(opportunity: Opportunity) -> tuple[tuple[str, str, str], ...]:
     """The physical trade an opportunity describes, independent of strategy.
 
@@ -428,6 +469,18 @@ async def run() -> None:
             logger.error("Only %d venue(s) connected (need >= %d); aborting", len(connected), MIN_CONNECTED_VENUES)
             return
 
+        # Suspended transfers are the reason a venue can quote persistently
+        # below everyone else without it being arbitrage. Surface them once
+        # at startup rather than leaving the resulting skips unexplained.
+        blocks = blocked_transfers()
+        if blocks:
+            logger.warning(
+                "%d suspended transfer(s) across connected venues; cross-venue routes buying these "
+                "assets there are unrebalanceable and will be skipped: %s",
+                len(blocks),
+                ", ".join(f"{venue}:{asset} {direction}" for venue, asset, direction in blocks[:20]),
+            )
+
         # Build the tradeable symbol list per venue from what it actually
         # lists, intersected with the configured universe -- never hardcoded.
         symbols_by_venue: dict[str, set[str]] = {}
@@ -536,10 +589,15 @@ async def run() -> None:
                 # the feed or the decay curve -- see `is_fillable`.
                 fillable: list[Opportunity] = []
                 for opportunity in all_opportunities:
-                    if is_fillable(opportunity):
-                        fillable.append(opportunity)
-                    else:
+                    if not is_fillable(opportunity):
                         metrics.record_rejection("too_thin_to_fill")
+                    elif not is_rebalanceable(opportunity):
+                        # The asset cannot leave the venue it would be
+                        # bought on, so the route runs once and strands
+                        # the position -- see `is_rebalanceable`.
+                        metrics.record_rejection("asset_cannot_be_transferred")
+                    else:
+                        fillable.append(opportunity)
                 all_opportunities = fillable
 
                 # Collapse the same physical trade found by several

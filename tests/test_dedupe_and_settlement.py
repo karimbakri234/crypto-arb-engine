@@ -20,9 +20,10 @@ Identical route, identical edge, identical PnL, counted twice.
 
 from __future__ import annotations
 
+from config.venues import clear_transfer_status, register_transfer_status
 from execution.inventory import InventoryManager
 from execution.router import Router
-from main import dedupe_by_route, route_key
+from main import dedupe_by_route, is_rebalanceable, route_key
 from strategies.base import Leg, Opportunity
 
 
@@ -156,3 +157,75 @@ def test_settling_twice_does_not_double_credit():
     router.settle_fill(opportunity)
 
     assert inventory.get_balance("htx", "SOL").free == 5.0
+
+
+# --- suspended transfers -----------------------------------------------------
+
+
+def _sol_route(buy_venue: str = "htx", sell_venue: str = "bitget") -> Opportunity:
+    return Opportunity(
+        strategy="cross_exchange",
+        symbol="SOL/USDT",
+        legs=(
+            Leg(buy_venue, "SOL/USDT", "buy", 103.72, 5.0, 0.001),
+            Leg(sell_venue, "SOL/USDT", "sell", 104.21, 5.0, 0.001),
+        ),
+        gross_profit_pct=0.47,
+        net_profit_pct=0.27,
+        max_size_usd=500.0,
+    )
+
+
+def test_a_route_buying_where_the_asset_cannot_be_withdrawn_is_rejected():
+    """The observed case: htx quoted SOL/USDT ~0.5% under bitget, mexc and
+    bingx for a full day, surviving 20 of 20 simultaneous samples -- because
+    htx had SOL withdrawals suspended. Buying there converts USDT into SOL
+    that cannot leave, so the edge is a one-way door, not arbitrage."""
+    clear_transfer_status()
+    register_transfer_status("htx", "SOL", can_withdraw_asset=False, can_deposit_asset=True)
+
+    assert is_rebalanceable(_sol_route()) is False
+
+
+def test_the_same_route_is_fine_once_withdrawals_reopen():
+    clear_transfer_status()
+    register_transfer_status("htx", "SOL", can_withdraw_asset=True, can_deposit_asset=True)
+
+    assert is_rebalanceable(_sol_route()) is True
+
+
+def test_a_sell_venue_that_cannot_receive_the_asset_is_rejected():
+    """The other half: the asset has to arrive somewhere to rebalance."""
+    clear_transfer_status()
+    register_transfer_status("bitget", "SOL", can_withdraw_asset=True, can_deposit_asset=False)
+
+    assert is_rebalanceable(_sol_route()) is False
+
+
+def test_missing_metadata_is_permissive():
+    """Plenty of venues report nothing. Refusing to trade on silence would
+    break far more than the blocked-withdrawal case it is guarding."""
+    clear_transfer_status()
+
+    assert is_rebalanceable(_sol_route()) is True
+
+
+def test_a_single_venue_route_needs_no_transfer_at_all():
+    """Triangular and cross_quote stay entirely on one exchange, so a
+    suspended withdrawal there is irrelevant to them."""
+    clear_transfer_status()
+    register_transfer_status("htx", "SOL", can_withdraw_asset=False, can_deposit_asset=False)
+
+    internal = Opportunity(
+        strategy="cross_quote",
+        symbol="SOL:USDC/USDT",
+        legs=(
+            Leg("htx", "SOL/USDC", "buy", 103.7, 5.0, 0.001),
+            Leg("htx", "SOL/USDT", "sell", 104.1, 5.0, 0.001),
+        ),
+        gross_profit_pct=0.39,
+        net_profit_pct=0.19,
+        max_size_usd=500.0,
+    )
+
+    assert is_rebalanceable(internal) is True

@@ -410,7 +410,9 @@ footer{ border-top:1px solid var(--border); padding:16px 20px; font-size:11.5px;
     below_venue_minimum_or_slippage: "Too small for the venue's minimum order, or the book was too thin to fill without excessive slippage.",
     edge_gone_before_execution: "The spread had already closed by the time the trade was checked again — this is latency, not a bug.",
     risk_limits: "Blocked by a risk limit (max notional, daily loss, trade count, or an exposure cap).",
-    too_thin_to_fill: "The quoted spread had almost no size behind it — below the venue's minimum order. Filtered before reaching the feed, since a spread nobody can fill isn't an opportunity."
+    too_thin_to_fill: "The quoted spread had almost no size behind it — below the venue's minimum order. Filtered before reaching the feed, since a spread nobody can fill isn't an opportunity.",
+    duplicate_route: "The same trade found by more than one strategy. latency_arb computes the same edge as cross_exchange plus one extra condition, so its hits are always cross_exchange hits too — counted once here, not twice.",
+    asset_cannot_be_transferred: "The venue quoting the low price has deposits or withdrawals suspended for that asset. You could buy it there and never move it out, so the discount is the market pricing in that you'd be stuck holding it — not an arbitrage."
   };
   function renderRejections(rejections){
     var wrap = $("#rejectPanel");
