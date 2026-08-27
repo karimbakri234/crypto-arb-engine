@@ -71,6 +71,13 @@ Three details worth knowing:
 - **`MemoryMax`/`MemoryHigh` cap the service's cgroup**, sized as the host's RAM minus a reserve (~330M/280M on a 512MB droplet; capped at 2GB on larger hosts, since the engine's steady state is a few hundred MB and anything past that is a leak worth capping rather than headroom worth granting). This is not about the bot dying — systemd restarts it. It's about the kernel OOM killer otherwise picking an arbitrary victim on the host: on a small droplet that has meant `sshd`, turning a bot outage into an unreachable machine.
 - **The mode is baked into the unit**, so a restart always comes back in that mode. A mode switched from the dashboard lives in process memory only — nothing can silently resurrect itself in `live` because of something you clicked once. Change the service's mode by re-running the installer with the mode you want.
 
+**Setting other environment variables:** a service does not inherit the environment of whoever ran `systemctl`. `FOO=bar systemctl restart kbot` sets `FOO` for the `systemctl` client process and the service never sees it — it starts with exactly the environment systemd gives it, and the run looks successful while silently using defaults. Put the variable in `.env` instead, which `python-dotenv` loads from `WorkingDirectory`:
+
+```bash
+echo "PAPER_SEED_MAX_VENUES=4" >> .env
+systemctl restart kbot
+```
+
 To remove it: `systemctl disable --now kbot && rm /etc/systemd/system/kbot.service && systemctl daemon-reload`.
 
 ## Local dashboard

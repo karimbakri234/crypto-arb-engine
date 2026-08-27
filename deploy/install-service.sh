@@ -91,7 +91,12 @@ else
   # all -- the engine's steady state is a few hundred MB, so anything past this
   # is a leak we want capped rather than headroom we want to hand out.
   (( max_mb > 2048 )) && max_mb=2048
-  high_mb=$(( max_mb * 85 / 100 ))          # start reclaiming before the hard cap
+  # MemoryHigh is a throttle, not a kill: past it the kernel reclaims hard
+  # and the process crawls. Measured steady state on a 512MB droplet is
+  # ~277M, so 85% of a 330M cap put MemoryHigh at 280M -- 3MB of headroom,
+  # meaning permanent reclaim pressure for no benefit. 92% leaves real room
+  # while keeping MemoryMax as the boundary that actually matters.
+  high_mb=$(( max_mb * 92 / 100 ))
   MEMORY_MAX="${max_mb}M"
   MEMORY_HIGH="${high_mb}M"
 fi
