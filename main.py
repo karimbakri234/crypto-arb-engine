@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 
 try:
     import uvloop
@@ -69,7 +70,21 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-8s %(na
 logger = logging.getLogger(__name__)
 
 MIN_CONNECTED_VENUES = 2
-PAPER_MODE_SEED_BALANCE = 1_000_000.0
+
+# Paper-mode starting balance per venue, in USD, split evenly between each
+# symbol's base and quote asset.
+#
+# This used to be a flat 1,000,000 *units* of every asset on every venue --
+# ~$200M of SOL on a single venue. The effect was that `Router.select`'s
+# inventory check, the thing that stops two strategies spending the same
+# balance, could never fail, and inventory never ran lopsided enough to
+# need a transfer. Paper mode reported profits that quietly assumed
+# unlimited capital, perfectly distributed, forever.
+#
+# A realistic figure makes paper mode answer the question that actually
+# matters: does this still make money when the same euros have to be in
+# the right place at the right time?
+PAPER_SEED_USD_PER_VENUE: float = float(os.getenv("PAPER_SEED_USD_PER_VENUE", "2000"))
 
 
 def build_strategies() -> list[Strategy]:
@@ -131,28 +146,67 @@ def build_strategies() -> list[Strategy]:
     ]
 
 
+_STABLE_USD_PROXIES = {"USDT", "USDC", "BUSD", "DAI", "TUSD", "FDUSD", "USD", "EUR"}
+
+
+def _usd_price_of(asset: str, book_store: BookStore) -> float | None:
+    """Best-effort USD value of one unit of `asset` from live books."""
+    if asset in _STABLE_USD_PROXIES:
+        return 1.0
+    for quote in ("USDT", "USDC", "USD"):
+        for book in book_store.all_for_symbol(f"{asset}/{quote}"):
+            state = book.snapshot()
+            bid, ask = state.best_bid, state.best_ask
+            if bid > 0 and ask < float("inf"):
+                return (bid + ask) / 2.0
+    return None
+
+
+def _seed_paper_inventory(
+    connected: list[str],
+    symbol_list: list[str],
+    inventory: InventoryManager,
+    book_store: BookStore,
+) -> None:
+    """Give each venue `PAPER_SEED_USD_PER_VENUE` spread over the assets it trades.
+
+    Sized in USD and converted to units at the live mid, rather than a
+    flat unit count per asset -- 1,000,000 units means $1M of USDT and
+    $200M of SOL, which is not a portfolio anyone has and quietly removes
+    every capital constraint from the simulation.
+    """
+    for venue_id in connected:
+        assets = {a for symbol in symbol_list for a in symbol.split("/")}
+        priced = {a: p for a in assets if (p := _usd_price_of(a, book_store)) is not None}
+        if not priced:
+            continue
+        usd_each = PAPER_SEED_USD_PER_VENUE / len(priced)
+        for asset, price in priced.items():
+            inventory.set_balance(venue_id, asset, usd_each / price)
+
+    logger.info(
+        "Seeded paper inventory: $%.0f per venue across %d venues (override with PAPER_SEED_USD_PER_VENUE)",
+        PAPER_SEED_USD_PER_VENUE, len(connected),
+    )
+
+
 async def _seed_inventory_for_mode(
     mode: str,
     connected: list[str],
     symbol_list: list[str],
     inventory: InventoryManager,
     rest_manager: RestManager,
+    book_store: BookStore,
 ) -> None:
     """Seed (or fetch) inventory the first time a mode that needs it is entered.
 
-    `paper` gets a large synthetic balance of every asset on every venue,
-    so nothing is spuriously blocked while simulating fills. `live` fetches
-    real free balances via each exchange's private API -- this is the one
-    place this engine reads real account state, and it only happens once
-    per mode-entry, not every tick.
+    `paper` gets a realistic synthetic balance sized in USD (see
+    `_seed_paper_inventory`). `live` fetches real free balances via each
+    exchange's private API -- this is the one place this engine reads real
+    account state, and it only happens once per mode-entry, not every tick.
     """
     if mode == "paper":
-        for venue_id in connected:
-            for symbol in symbol_list:
-                base, quote = symbol.split("/")
-                inventory.set_balance(venue_id, base, PAPER_MODE_SEED_BALANCE)
-                inventory.set_balance(venue_id, quote, PAPER_MODE_SEED_BALANCE)
-        logger.info("Seeded synthetic paper-mode balances across %d venues", len(connected))
+        _seed_paper_inventory(connected, symbol_list, inventory, book_store)
     elif mode == "live":
         for venue_id in connected:
             try:
@@ -189,6 +243,43 @@ def is_fillable(opportunity: Opportunity) -> bool:
         return False
     required = max(min_order_usd_for(leg.venue_id) for leg in opportunity.legs)
     return opportunity.max_size_usd >= required
+
+
+def route_key(opportunity: Opportunity) -> tuple[tuple[str, str, str], ...]:
+    """The physical trade an opportunity describes, independent of strategy.
+
+    Two strategies can describe the same trade. `latency_arb` computes
+    exactly the same net edge as `cross_exchange` -- same formula, same
+    inputs -- and then adds one extra condition (the buy venue's book
+    being staler than the sell venue's). Every latency_arb hit is
+    therefore, by construction, also a cross_exchange hit. They are not
+    two findings that happen to agree; they cannot disagree.
+
+    Left undeduplicated they were each recorded, each executed, and each
+    counted, so one real trade produced two entries in the feed and twice
+    its PnL -- observed live as identical `+0.162% / $0.81` rows for
+    SOL/USDT htx->bingx under both strategy names.
+    """
+    return tuple(sorted((leg.venue_id, leg.symbol, leg.side) for leg in opportunity.legs))
+
+
+def dedupe_by_route(opportunities: list[Opportunity]) -> tuple[list[Opportunity], int]:
+    """Keep the best-edged opportunity per distinct route.
+
+    Returns the kept opportunities and how many duplicates were dropped.
+    """
+    best: dict[tuple[tuple[str, str, str], ...], Opportunity] = {}
+    duplicates = 0
+    for opportunity in opportunities:
+        key = route_key(opportunity)
+        incumbent = best.get(key)
+        if incumbent is None:
+            best[key] = opportunity
+        else:
+            duplicates += 1
+            if opportunity.net_profit_pct > incumbent.net_profit_pct:
+                best[key] = opportunity
+    return list(best.values()), duplicates
 
 
 def _rescan_net_profit_pct(book_store: BookStore, opportunity: Opportunity) -> float | None:
@@ -302,7 +393,7 @@ async def run() -> None:
 
         seeded_modes: set[str] = set()
         if control.mode in ("paper", "live"):
-            await _seed_inventory_for_mode(control.mode, connected, symbol_list, inventory, rest_manager)
+            await _seed_inventory_for_mode(control.mode, connected, symbol_list, inventory, rest_manager, book_store)
             seeded_modes.add(control.mode)
 
         feed_manager = FeedManager(book_store, rest_manager)
@@ -345,7 +436,7 @@ async def run() -> None:
                 # startup only, so a switch made mid-run actually has
                 # capital to trade against instead of silently filtering
                 # every opportunity out for lack of reservable balance.
-                await _seed_inventory_for_mode(control.mode, connected, symbol_list, inventory, rest_manager)
+                await _seed_inventory_for_mode(control.mode, connected, symbol_list, inventory, rest_manager, book_store)
                 seeded_modes.add(control.mode)
             new_opportunities: list[Opportunity] = []
 
@@ -384,6 +475,14 @@ async def run() -> None:
                         metrics.record_rejection("too_thin_to_fill")
                 all_opportunities = fillable
 
+                # Collapse the same physical trade found by several
+                # strategies into one -- see `route_key`. This has to
+                # happen before recording, or the feed, the decay curve
+                # and PnL all count one trade more than once.
+                all_opportunities, duplicate_count = dedupe_by_route(all_opportunities)
+                for _ in range(duplicate_count):
+                    metrics.record_rejection("duplicate_route")
+
                 for opportunity in all_opportunities:
                     metrics.record_hit(opportunity.strategy, hit=True)
                     opportunity_id = recorder.record(opportunity)
@@ -412,12 +511,21 @@ async def run() -> None:
                     # earlier trade's PnL to every later opportunity that the
                     # risk manager, router, or profitability re-check skips.
                     if len(executor.trade_log) > trades_before:
+                        # Move the balance the fill actually moved, so the
+                        # next tick sees the inventory this trade consumed.
+                        router.settle_fill(opportunity)
                         last_trade = executor.trade_log[-1]
                         pnl = last_trade.pnl_usd or 0.0
                         metrics.record_pnl(opportunity.strategy, pnl)
                         recorder_id = opportunity.detail.get("recorder_id")
                         if recorder_id is not None:
                             recorder.attach_trade_result(recorder_id, pnl, control.mode)
+                    else:
+                        # The executor rejected it (edge gone, below venue
+                        # minimum). `router.select` had already locked the
+                        # balance; without this it stays locked forever and
+                        # the engine slowly starves itself of inventory.
+                        router.release_unfilled(opportunity)
 
                 recorder.flush()
 

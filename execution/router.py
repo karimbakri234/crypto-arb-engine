@@ -69,6 +69,13 @@ class Router:
                     break
 
             if ok:
+                # Stash what was locked so the caller can resolve it after
+                # the executor decides. An accepted opportunity is NOT a
+                # completed trade -- the executor still re-checks
+                # profitability and venue minimums and may reject it -- so
+                # the reservation has to survive until that outcome is
+                # known. Before this, nothing ever unlocked it either way.
+                opportunity.detail["_reservations"] = reserved
                 accepted.append(opportunity)
             else:
                 for venue_id, asset, notional in reserved:
@@ -76,3 +83,41 @@ class Router:
                 logger.debug("Skipped %s: could not reserve inventory for all legs", opportunity)
 
         return accepted
+
+    def release_unfilled(self, opportunity: Opportunity) -> None:
+        """Hand a rejected opportunity's reserved balance back to free."""
+        for venue_id, asset, amount in opportunity.detail.pop("_reservations", []):
+            self.inventory.release(venue_id, asset, amount)
+
+    def settle_fill(self, opportunity: Opportunity) -> None:
+        """Apply a completed trade to inventory: spend one asset, receive the other.
+
+        This is what makes inventory drift real. A cross-exchange fill
+        spends QUOTE on the buy venue and BASE on the sell venue, and
+        credits back the opposite asset on each -- so buying SOL on htx
+        and selling it on bingx steadily drains htx's USDT and bingx's
+        SOL. Repeat it enough and one side runs dry and the router stops
+        funding the route, which is exactly the point at which a real
+        operator has to pay for a transfer. Leaving fills unsettled (the
+        previous behaviour) made that cost invisible.
+        """
+        # Popping the reservations is what makes this idempotent: the
+        # credit loop below mints balance, so a second call on the same
+        # opportunity (a retry, a future refactor) would otherwise create
+        # assets out of nothing. Settling something that was never
+        # reserved is a bug, not a no-op, so return rather than credit.
+        reservations = opportunity.detail.pop("_reservations", None)
+        if not reservations:
+            return
+
+        for venue_id, asset, amount in reservations:
+            self.inventory.settle(venue_id, asset, amount)
+
+        for leg in opportunity.legs:
+            if "/" not in leg.symbol or leg.size <= 0:
+                continue
+            base, quote = leg.symbol.split("/", 1)
+            if leg.side == "buy":
+                self.inventory.credit(leg.venue_id, base, leg.size)
+            elif leg.side == "sell":
+                self.inventory.credit(leg.venue_id, quote, leg.price * leg.size)

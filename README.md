@@ -29,6 +29,7 @@ cp .env.example .env   # then fill in real API keys / RPC URLs
 - RPC endpoints per chain: `ETH_RPC_URL`, `ARBITRUM_RPC_URL`, `BASE_RPC_URL`, `POLYGON_RPC_URL`, `BSC_RPC_URL`, `SOLANA_RPC_URL`.
 - Aggregator API keys (optional): `ONEINCH_API_KEY`, `ZEROX_API_KEY`, `JUPITER_API_KEY`, `ODOS_API_KEY`.
 - Risk overrides: `MAX_TRADE_USD`, `DAILY_LOSS_LIMIT_USD`, `MAX_TRADES_PER_DAY`, `MAX_CONSECUTIVE_FAILURES`.
+- Paper capital: `PAPER_SEED_USD_PER_VENUE` (default `2000`) — the synthetic balance each venue starts with in `paper` mode, in USD, converted to units at the live mid and split across the assets that venue trades. See [Paper mode models finite capital](#paper-mode-models-finite-capital).
 - Dashboard: `DASHBOARD_ENABLED` (default `true`), `DASHBOARD_HOST` (default `127.0.0.1`), `DASHBOARD_PORT` (default `8420`), `DASHBOARD_USERNAME`/`DASHBOARD_PASSWORD` (required together if `DASHBOARD_HOST` is not local) — see [Local dashboard](#local-dashboard).
 
 All credentials load via `python-dotenv` from a local `.env`. Nothing is hardcoded.
@@ -98,6 +99,7 @@ analytics/  latency/hit-rate/PnL metrics, parquet opportunity recorder with deca
 dashboard/  local control-plane API + frontend for a running engine process (see "Local dashboard" above)
 benchmarks/ synthetic full-universe detection throughput benchmark
 deploy/     systemd unit template + installer for running the engine unattended
+tools/      operational diagnostics (venue book-lag / market-type checker)
 tests/      pytest suite, one module per strategy + core + execution/risk, plus hypothesis property tests
 main.py     async entry point
 ```
@@ -204,6 +206,37 @@ For scale, that same measurement was **~28 seconds** before the `multi_leg` comb
 
 37 ms is still above the 5 ms `state_to_detect` budget in `config.settings.LATENCY_BUDGETS`. That budget describes a machine fed by real websocket streams, not a small VPS on REST polling; treat it as the target that justifies a feed upgrade, not as a threshold this configuration is expected to meet.
 
+## Paper mode models finite capital
+
+Paper mode is only useful if it can report a loss. Three things had to be fixed before it could, all found by reading a live dashboard showing **$331.17 across 244 trades** — a number that was wrong in three independent ways:
+
+**1. One trade, counted twice.** `latency_arb` computes exactly the same net edge as `cross_exchange` — same formula, same inputs — and adds a single extra condition (the buy venue's book being staler than the sell venue's). Every latency_arb hit is therefore *by construction* also a cross_exchange hit; they cannot disagree. Undeduplicated, one real trade produced two feed entries, two decay-curve samples, and twice its PnL. `main.route_key` now collapses opportunities by the physical trade they describe — `(venue, symbol, side)` per leg — keeping the best edge and counting the rest as `duplicate_route` rejections.
+
+**2. Unlimited capital.** Paper mode seeded `1_000_000` *units* of every asset on every venue — roughly $200M of SOL on a single exchange. `Router.select`'s inventory check, the thing that stops two strategies spending the same balance, could therefore never fail. Now seeded in USD (`PAPER_SEED_USD_PER_VENUE`, default $2000/venue) and converted at the live mid.
+
+**3. Fills that consumed nothing.** `InventoryManager.settle()` existed and was called from nowhere; reservations were locked at selection and never resolved either way. So balances never depleted and never recovered. `Router.settle_fill` now moves balance the way a fill does — a buy spends the venue's quote and credits its base, a sell the reverse — and `Router.release_unfilled` returns the lock when the executor rejects a trade.
+
+Together these make the constraint that actually governs cross-exchange arbitrage visible: buying SOL on htx and selling it on bingx drains htx's USDT and bingx's SOL, and after a few trades the route stops funding. **That's not a bug — that's the point at which a real operator pays for a transfer.** Hiding it made paper mode report profits that assumed capital was infinite, instantly available everywhere, and free to move.
+
+## Diagnosing a venue: real edge, or stale book?
+
+`tools/venue_lag.py` answers a question the engine cannot answer about itself. `latency_arb` flags a venue as stale using *our* receive timestamps — so a venue polled less often looks stale whether or not it is, and a persistent edge against it is indistinguishable from an artifact of our own schedule.
+
+```bash
+python -m tools.venue_lag                                    # SOL/USDT, default venues
+python -m tools.venue_lag --symbol BTC/USDT --rounds 40
+python -m tools.venue_lag --venues htx,bingx,bitget --interval 2
+```
+
+It fetches every venue in a single `asyncio.gather` — one instant, no schedule skew — and reports each venue's own reported book timestamp, its round-trip latency, **the market type it resolved the symbol to**, and the net edge as the engine would compute it. Read it as:
+
+| Observation | Meaning |
+|---|---|
+| Edge survives simultaneous fetches, timestamps close | A real basis. Tradeable, but mind the transfer cost to reset inventory — a persistent one-directional edge is not a round trip. |
+| Edge disappears when fetched simultaneously | Our polling schedule manufactured it. Nothing there. |
+| Edge survives, one venue's timestamps consistently seconds old | That venue publishes stale books. The price is real in the sense that they published it; it is not one you can trade against. |
+| Venues report different market types | A perp quoted against a spot book. Perpetuals trade at a premium or discount to spot as a matter of course — funding rates exist to manage precisely that gap. This is the basis, not a riskless spread. |
+
 ## Profitability instrumentation
 
 Detection numbers alone tell you nothing about whether this is profitable — a spread the code "finds" that's gone by the time you can act on it isn't a spread you captured. `analytics/recorder.py` is built to answer that directly instead of assuming it:
@@ -270,7 +303,7 @@ Read this section in full before ever setting `ARB_MODE=live`.
 ## Testing
 
 ```bash
-pytest         # 184 tests: core (O(1) BookStore symbol index, MarketState matrix cache, bounded cycle search), all 15 strategies, execution/risk (pre-execution profitability re-check, venue minimum order sizes, deployed-capital release), analytics (bounded in-memory history, decay re-pricing), connect-time market pruning + live fee capture, tier-aware poll scheduling + concurrency cap, symbol-budget selection, dashboard API + Basic Auth + /ws ticket fallback + venue credentials, config venue-id validation, systemd unit rendering, hypothesis property tests -- no live network calls
+pytest         # 192 tests: core (O(1) BookStore symbol index, MarketState matrix cache, bounded cycle search), all 15 strategies, execution/risk (pre-execution profitability re-check, venue minimum order sizes, deployed-capital release), analytics (bounded in-memory history, decay re-pricing), connect-time market pruning + live fee capture, tier-aware poll scheduling + concurrency cap, symbol-budget selection, dashboard API + Basic Auth + /ws ticket fallback + venue credentials, config venue-id validation, systemd unit rendering, cross-strategy route dedup, inventory settlement, hypothesis property tests -- no live network calls
 ruff check .   # clean
 python -m benchmarks.bench_detection
 ```

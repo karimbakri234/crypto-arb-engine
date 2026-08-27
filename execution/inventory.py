@@ -85,6 +85,24 @@ class InventoryManager:
         balance.locked = max(0.0, balance.locked - amount)
         self._balances[(venue_id, asset)] = balance
 
+    def credit(self, venue_id: str, asset: str, amount: float) -> None:
+        """Add `amount` to free balance -- the asset a filled leg received.
+
+        `settle` only removes what a leg spent. Without the matching
+        credit, a buy would consume USDT on the buy venue and the SOL it
+        bought would never appear anywhere, so inventory would drain to
+        zero no matter how well the trading went. Together the two calls
+        move balance across the (venue, asset) grid the way a real fill
+        does -- which is what makes the lopsided drift that eventually
+        forces a rebalancing transfer actually show up in paper mode
+        instead of being silently free.
+        """
+        if amount <= 0:
+            return
+        balance = self.get_balance(venue_id, asset)
+        balance.free += amount
+        self._balances[(venue_id, asset)] = balance
+
     def total_across_venues(self, asset: str) -> float:
         return sum(b.total for (v, a), b in self._balances.items() if a == asset)
 
