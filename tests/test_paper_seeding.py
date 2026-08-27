@@ -119,3 +119,31 @@ def test_an_unpriceable_asset_is_skipped_not_seeded_at_zero(monkeypatch):
 
     assert inventory.get_balance("kraken", "NOSUCH").total == 0.0
     assert inventory.get_balance("kraken", "USDT").free > 0.0
+
+
+def test_seeding_without_books_seeds_only_cash(monkeypatch, caplog):
+    """The startup-ordering bug, pinned. Base assets are converted from USD
+    at the live mid, so with no books only the stablecoins (1.0 by
+    definition) can be priced. The result funds every buy leg and no sell
+    leg: the engine runs, finds opportunities, trades nothing, and reports
+    no error. It must be loud instead."""
+    monkeypatch.setattr(main, "PAPER_SEED_USD_TOTAL", 1000.0)
+    monkeypatch.setattr(main, "PAPER_SEED_MAX_VENUES", 0)
+    inventory = InventoryManager()
+
+    with caplog.at_level("ERROR"):
+        _seed_paper_inventory(["kraken"], SYMBOLS, inventory, BookStore())
+
+    assert inventory.get_balance("kraken", "USDT").free > 0.0
+    assert inventory.get_balance("kraken", "SOL").total == 0.0
+    assert "stablecoins only" in caplog.text
+
+
+def test_seeding_with_books_funds_both_sides():
+    inventory = InventoryManager()
+
+    _seed_paper_inventory(["kraken"], SYMBOLS, inventory, _book_store())
+
+    assert inventory.get_balance("kraken", "USDT").free > 0.0
+    assert inventory.get_balance("kraken", "SOL").free > 0.0
+    assert inventory.get_balance("kraken", "BTC").free > 0.0

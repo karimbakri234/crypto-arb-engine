@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 
 try:
     import uvloop
@@ -207,6 +208,34 @@ def _plan_paper_allocation(symbol_list: list[str], venue_usd: float) -> dict[str
     return allocation
 
 
+async def _await_first_books(
+    book_store: BookStore,
+    symbols: list[str],
+    timeout_sec: float = 45.0,
+) -> int:
+    """Block until enough order books have arrived to price assets in USD.
+
+    The first REST poll cycle across every venue takes seconds, and
+    anything depending on a live mid before then reads an empty store.
+    Waits for half the polled symbols rather than all of them -- a single
+    slow or failing venue should not hold up startup indefinitely.
+    """
+    deadline = time.monotonic() + timeout_sec
+    target = max(1, len(symbols) // 2)
+    populated = 0
+    while time.monotonic() < deadline:
+        populated = sum(1 for symbol in symbols if book_store.all_for_symbol(symbol))
+        if populated >= target:
+            return populated
+        await asyncio.sleep(1.0)
+
+    logger.warning(
+        "Only %d of %d symbols had books after %.0fs; continuing anyway",
+        populated, len(symbols), timeout_sec,
+    )
+    return populated
+
+
 def _seed_paper_inventory(
     connected: list[str],
     symbol_list: list[str],
@@ -252,6 +281,23 @@ def _seed_paper_inventory(
     # is under the venue minimums the engine already enforces, the run
     # will report zero trades -- which is a true answer about this much
     # capital, but an expensive one to wait several hours to discover.
+    # A book of pure stablecoin can fund the buy leg of a cross-venue route
+    # and never the sell leg, so the engine runs, finds opportunities, and
+    # trades nothing -- with no error anywhere to explain it. This happens
+    # whenever seeding runs before the first books arrive, since a base
+    # asset with no book cannot be converted from USD at all.
+    non_stable_positions = sum(
+        1
+        for asset, usd in allocation.items()
+        if asset not in _STABLE_USD_PROXIES and usd > 0 and _usd_price_of(asset, book_store) is not None
+    )
+    if non_stable_positions == 0:
+        logger.error(
+            "Paper inventory is stablecoins only -- no base asset could be priced, so no "
+            "cross-venue route can fund its sell leg and the engine will trade nothing. "
+            "This means seeding ran before order books were available."
+        )
+
     largest = max(allocation.values(), default=0.0)
     typical_minimum = min_order_usd_for(venues[0])
     if largest < typical_minimum:
@@ -511,13 +557,20 @@ async def run() -> None:
             )
             return
 
-        seeded_modes: set[str] = set()
-        if control.mode in ("paper", "live"):
-            await _seed_inventory_for_mode(control.mode, connected, symbol_list, inventory, rest_manager, book_store)
-            seeded_modes.add(control.mode)
-
         feed_manager = FeedManager(book_store, rest_manager)
         await feed_manager.start(connected, symbol_list, REST_POLL_INTERVAL_SEC)
+
+        # Seed AFTER the feed is up. Paper balances are sized in USD and
+        # converted at the live mid, so seeding against an empty BookStore
+        # can only price the stablecoins (which are 1.0 by definition) and
+        # silently skips every base asset. That leaves a book of pure cash,
+        # which can fund the buy leg of a cross-venue route and never the
+        # sell leg -- an engine that looks healthy and cannot trade.
+        seeded_modes: set[str] = set()
+        if control.mode in ("paper", "live"):
+            await _await_first_books(book_store, symbol_list)
+            await _seed_inventory_for_mode(control.mode, connected, symbol_list, inventory, rest_manager, book_store)
+            seeded_modes.add(control.mode)
 
         strategies = build_strategies()
         metrics.start_http_server(METRICS_HTTP_PORT)
