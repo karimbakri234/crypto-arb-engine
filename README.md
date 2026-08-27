@@ -43,6 +43,35 @@ ARB_MODE=live python main.py      # real orders against pre-funded inventory -- 
 
 A `/metrics` HTTP endpoint (`METRICS_HTTP_PORT`, default 9100) serves a JSON snapshot of latency histograms, hit rates, and PnL attribution; the same snapshot is also logged periodically.
 
+### Running it as a service (recommended for anything unattended)
+
+The commands above run in the foreground; backgrounding them with `nohup ... & disown` leaves nothing to restart the bot when it crashes, gets OOM-killed, or the host reboots. On a systemd host, install it as a service instead — once:
+
+```bash
+bash deploy/install-service.sh            # mode from .env, or paper if unset
+bash deploy/install-service.sh monitor    # or pin the mode explicitly
+bash deploy/install-service.sh --dry-run  # print the unit it would install, change nothing
+```
+
+Then:
+
+```bash
+systemctl status kbot      # is it up?
+journalctl -u kbot -f      # live logs
+systemctl restart kbot     # after a git pull
+systemctl stop kbot        # stop it (stays stopped until started again)
+```
+
+`deploy/kbot.service` is a template with `__PLACEHOLDER__` tokens; the installer substitutes the repo path, the mode, and memory limits sized from the host's actual RAM, then stops any previously running instance (service *or* stray `nohup` process, which would otherwise hold the dashboard and `/metrics` ports), installs the unit, and enables it at boot. `tests/test_deploy_service.py` covers that substitution contract — an unsubstituted placeholder yields a unit that fails only at boot, on the one machine nobody is watching.
+
+Three details worth knowing:
+
+- **`ExecStart` invokes `.venv/bin/python` by absolute path** rather than sourcing the venv. `source .venv/bin/activate` is an interactive-shell-ism that no-ops in a service context, and a bot started without its venv doesn't fail loudly — it fails as `ModuleNotFoundError: ccxt` in a log nobody is reading.
+- **`MemoryMax`/`MemoryHigh` cap the service's cgroup**, sized as the host's RAM minus a reserve (~330M/280M on a 512MB droplet; capped at 2GB on larger hosts, since the engine's steady state is a few hundred MB and anything past that is a leak worth capping rather than headroom worth granting). This is not about the bot dying — systemd restarts it. It's about the kernel OOM killer otherwise picking an arbitrary victim on the host: on a small droplet that has meant `sshd`, turning a bot outage into an unreachable machine.
+- **The mode is baked into the unit**, so a restart always comes back in that mode. A mode switched from the dashboard lives in process memory only — nothing can silently resurrect itself in `live` because of something you clicked once. Change the service's mode by re-running the installer with the mode you want.
+
+To remove it: `systemctl disable --now kbot && rm /etc/systemd/system/kbot.service && systemctl daemon-reload`.
+
 ## Local dashboard
 
 `main.py` also starts a small control-plane dashboard (`dashboard/`) in the same process, bound to `http://127.0.0.1:8420` by default. Open that URL in a browser while the bot is running to see live opportunities (each with its realized $ P&L once it's actually been traded in paper/live mode, not just its detected spread), per-strategy toggles, latency/decay charts, and every configured venue's connection + API-key status, and to control the running process: switch mode (monitor/paper/live), start/stop the detection loop, pull the emergency stop, and adjust risk limits.
@@ -68,6 +97,7 @@ risk/       declarative limits + enforcement (capital, exposure, circuit breaker
 analytics/  latency/hit-rate/PnL metrics, parquet opportunity recorder with decay-curve tracking
 dashboard/  local control-plane API + frontend for a running engine process (see "Local dashboard" above)
 benchmarks/ synthetic full-universe detection throughput benchmark
+deploy/     systemd unit template + installer for running the engine unattended
 tests/      pytest suite, one module per strategy + core + execution/risk, plus hypothesis property tests
 main.py     async entry point
 ```
@@ -233,14 +263,14 @@ Read this section in full before ever setting `ARB_MODE=live`.
 11. **`statistical.py` is not arbitrage.** It carries real directional risk and can lose money even when everything is implemented correctly.
 12. **The dashboard is a real control surface, not a viewer.** Anyone who can reach `http://<DASHBOARD_HOST>:<DASHBOARD_PORT>` can switch the running process to `live` and arm real orders, and can now also set exchange API credentials directly from the "Connected venues" panel. The default (`127.0.0.1`) keeps it reachable only from the machine the bot runs on; treat changing that host the same way you'd treat exposing an exchange API key. If you do expose it, set `DASHBOARD_USERNAME`/`DASHBOARD_PASSWORD` (see [Local dashboard](#local-dashboard)) — an exposed dashboard with no login is equivalent to publishing your exchange API keys.
 13. **Exchange ToS, tax treatment of arbitrage trading, and local regulation on automated trading all vary by exchange and jurisdiction.** That's on you to check before running anything live.
-14. **Nothing restarts this process if it crashes or gets OOM-killed.** Running it via `nohup ... & disown` (as this README's own examples do) means a crash — out-of-memory, an unhandled exception, the host rebooting — leaves the bot silently down until someone notices and manually re-runs it. In `live` mode that silently stops managing open exposure, not just detection. Before trusting this with real capital, run it under something that restarts it automatically (a `systemd` unit with `Restart=on-failure`, or equivalent) rather than a bare background shell job.
+14. **A restart is not recovery.** `deploy/install-service.sh` (see [Running it as a service](#running-it-as-a-service-recommended-for-anything-unattended)) fixes the crude half of this — a crash, an OOM kill, or a reboot no longer leaves the bot silently down until someone notices. What it does *not* do is make a crash safe in `live` mode: systemd restarts the process, and the fresh process has no memory of orders that were in flight when the old one died. `execution/reconciler.py` detects one-sided fills within a single process lifetime; it does not reconcile against the exchange on startup. A crash between two legs of a live trade therefore leaves real, unhedged exposure that nothing will notice or unwind. Startup reconciliation against actual exchange balances and open orders is required work before `live` — restarting reliably in the wrong state is not better than staying down.
 
 **Workflow: run `monitor` for days and read the decay-curve analytics, then graduate to `paper` and confirm simulated results line up with what the decay curve implied was capturable, and only then consider `live` — with capital you can genuinely afford to lose.**
 
 ## Testing
 
 ```bash
-pytest         # 166 tests: core (O(1) BookStore symbol index, MarketState matrix cache, bounded cycle search), all 15 strategies, execution/risk (pre-execution profitability re-check, venue minimum order sizes, deployed-capital release), analytics (bounded in-memory history, decay re-pricing), connect-time market pruning + live fee capture, tier-aware poll scheduling + concurrency cap, symbol-budget selection, dashboard API + Basic Auth + /ws ticket fallback + venue credentials, config venue-id validation, hypothesis property tests -- no live network calls
+pytest         # 184 tests: core (O(1) BookStore symbol index, MarketState matrix cache, bounded cycle search), all 15 strategies, execution/risk (pre-execution profitability re-check, venue minimum order sizes, deployed-capital release), analytics (bounded in-memory history, decay re-pricing), connect-time market pruning + live fee capture, tier-aware poll scheduling + concurrency cap, symbol-budget selection, dashboard API + Basic Auth + /ws ticket fallback + venue credentials, config venue-id validation, systemd unit rendering, hypothesis property tests -- no live network calls
 ruff check .   # clean
 python -m benchmarks.bench_detection
 ```

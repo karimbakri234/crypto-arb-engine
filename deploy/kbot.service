@@ -1,0 +1,47 @@
+[Unit]
+Description=crypto-arb-engine (KbotV2) detection engine and dashboard
+Documentation=https://github.com/karimbakri234/crypto-arb-engine
+# Exchange connections need DNS and routing up before load_markets().
+After=network-online.target
+Wants=network-online.target
+
+# Never give up on restarting. A venue outage or a transient network fault at
+# boot must not leave the engine permanently down -- that's the exact failure
+# mode this unit exists to prevent. (These are [Unit] keys; systemd ignores
+# them with a warning if they're put under [Service], which silently restores
+# the default "5 failures in 10s and it stays dead".)
+StartLimitIntervalSec=0
+StartLimitBurst=0
+
+[Service]
+Type=simple
+WorkingDirectory=__REPO_DIR__
+
+# Invoke the venv's interpreter directly rather than activating the venv.
+# `source .venv/bin/activate` only works in an interactive shell, and
+# forgetting it is what silently produced "python: command not found"
+# (and a bot that never started) on several manual restarts.
+ExecStart=__REPO_DIR__/.venv/bin/python main.py
+
+# ARB_MODE is read by config/settings.py. `.env` is still loaded by
+# python-dotenv from WorkingDirectory, so credentials and dashboard
+# settings continue to live there; this only fixes the run mode.
+Environment=ARB_MODE=__ARB_MODE__
+Environment=PYTHONUNBUFFERED=1
+
+Restart=always
+RestartSec=10
+
+# Contain the engine's memory to the cgroup so a runaway allocation kills
+# and restarts *this* service, instead of the kernel's OOM killer picking
+# an arbitrary victim on the host (which is what previously took down the
+# whole box, SSH included). Raise this on a larger droplet.
+MemoryMax=__MEMORY_MAX__
+MemoryHigh=__MEMORY_HIGH__
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=kbot
+
+[Install]
+WantedBy=multi-user.target
